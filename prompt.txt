@@ -1,0 +1,7 @@
+Read PLAN.md - it contains the full context for implementing a custom CubeEye ToF driver with dual-frequency CRT phase unwrapping.
+
+  Summary: Bypass the proprietary SDK and implement V4L2 + CUDA depth processing. The sensor uses 80MHz + 100MHz dual-frequency modulation. Raw frames are 1600x241 uint16 with 5 sub-pixels per spatial position.
+
+  The sensor is now detected at /dev/video0. SDK is at ~/development/atlas/code/atlas_levo/src/3rdparty/drivers/ros2-cubeeye2.0/cubeeye2.0/
+
+  Start with Phase 1: Verify SDK capture works as ground truth, then capture raw V4L2 frames for analysis.

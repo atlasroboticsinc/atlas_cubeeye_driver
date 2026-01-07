@@ -1,0 +1,56 @@
+# Build artifacts
+build/
+*.o
+*.so
+*.a
+
+# Data files (too large for git)
+data/
+*.raw
+*.bin
+*.npy
+
+# Decompiled SDK (proprietary)
+libCubeEye.c
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+
+# Perf data
+perf.data
+perf.data.old
+
+# Test output directories
+*_test/
+*_temp/
+*_output/
+trace_*/
+cal_*/
+benchmark/
+extracted_calibration/
+fppn_*/
+gdb_test/
+ruler_temp/
+scripts/
+usb_test_temp/
+variable_dist/
+far_field_benchmark/
+far_raw/
+raw_benchmark/
+calibration_test/
+
+# Generated images
+*.png
