@@ -190,58 +190,126 @@ corrected = raw_depth + gradient_lut[raw_depth];
 └─────────────────────────────────────┘
 ```
 
-## CUDA Implementation Design (Planned)
+## CUDA Implementation
 
 ### Kernel Configuration
 
 ```
-Grid:   240 blocks (one per raw row)
-Block:  320 threads (one per 5-byte group)
-Shared: 3,200 bytes (one row of raw data)
+Grid:   240 blocks (one per raw data row)
+Block:  320 threads (one per 5-byte group = 2 pixels)
+Shared: 1,600 bytes (depth section of one row)
 ```
 
-### Kernel Pseudocode
+### Files
+
+- `src/cubeeye_depth_cuda.h` - CUDA API header
+- `src/cubeeye_depth_cuda.cu` - CUDA kernel implementation
+- `src/test_cubeeye_depth_cuda.cpp` - Test/benchmark program
+
+### Kernel Implementation
 
 ```cuda
 __global__ void ExtractDepthKernel(
     const uint8_t* __restrict__ raw_frame,
     uint16_t* __restrict__ depth_out,
-    const int16_t* __restrict__ gradient_lut
-) {
-    int row = blockIdx.x;
-    int group = threadIdx.x;  // 0-319, each handles 5 bytes → 2 pixels
+    const int16_t* __restrict__ gradient_lut,
+    bool apply_correction,
+    bool interpolate)
+{
+    const int row = blockIdx.x;
+    const int group = threadIdx.x;  // 0-319
 
-    // Load row into shared memory (coalesced)
-    __shared__ uint8_t row_data[3200];
-    // ... cooperative load ...
+    // Shared memory for depth section of current row
+    __shared__ uint8_t s_depth_data[1600];
+
+    // Calculate offsets (skip header row, skip amplitude section)
+    const int row_offset = (row + 1) * 3200;
+    const int depth_offset = row_offset + 1600;
+
+    // Cooperative load: each thread loads 5 bytes
+    const int load_offset = group * 5;
+    s_depth_data[load_offset + 0] = raw_frame[depth_offset + load_offset + 0];
+    s_depth_data[load_offset + 1] = raw_frame[depth_offset + load_offset + 1];
+    s_depth_data[load_offset + 2] = raw_frame[depth_offset + load_offset + 2];
+    s_depth_data[load_offset + 3] = raw_frame[depth_offset + load_offset + 3];
+    s_depth_data[load_offset + 4] = raw_frame[depth_offset + load_offset + 4];
 
     __syncthreads();
 
     // Unpack 5 bytes → 2 depths
-    const uint8_t* bytes = row_data + 1600 + group * 5;
     uint16_t d0, d1;
-    Unpack5Bytes(bytes, d0, d1);
+    Unpack5Bytes(&s_depth_data[group * 5], d0, d1);
 
-    // Apply gradient correction
-    d0 = clamp(d0 + gradient_lut[min(d0, 7500)], 0, 7500);
-    d1 = clamp(d1 + gradient_lut[min(d1, 7500)], 0, 7500);
+    // Apply gradient correction from LUT
+    if (apply_correction && gradient_lut != nullptr) {
+        int idx0 = min((int)d0, 7500);
+        int idx1 = min((int)d1, 7500);
+        d0 = clamp((int)d0 + gradient_lut[idx0], 0, 7500);
+        d1 = clamp((int)d1 + gradient_lut[idx1], 0, 7500);
+    }
 
-    // Write with 2× vertical duplication
-    int col = group * 2;
-    int out_row = row * 2;
-    depth_out[out_row * 640 + col] = d0;
-    depth_out[out_row * 640 + col + 1] = d1;
-    depth_out[(out_row + 1) * 640 + col] = d0;
-    depth_out[(out_row + 1) * 640 + col + 1] = d1;
+    // Write with optional 2× vertical duplication
+    const int col = group * 2;
+    if (interpolate) {
+        const int out_row = row * 2;
+        depth_out[out_row * 640 + col] = d0;
+        depth_out[out_row * 640 + col + 1] = d1;
+        depth_out[(out_row + 1) * 640 + col] = d0;
+        depth_out[(out_row + 1) * 640 + col + 1] = d1;
+    } else {
+        depth_out[row * 640 + col] = d0;
+        depth_out[row * 640 + col + 1] = d1;
+    }
 }
 ```
 
-### Expected Performance
+### Memory Management
 
-- Input: 771,200 bytes
-- Output: 307,200 × 2 bytes = 614,400 bytes
-- Compute: 240 × 320 × 2 = 153,600 depth calculations
-- Memory bandwidth limited: ~0.1ms theoretical on Jetson Orin
+```
+Device Memory:
+  - d_raw_frame_:      771,200 bytes (input)
+  - d_depth_out_:      614,400 bytes (640×480×2)
+  - d_amplitude_out_:  614,400 bytes (optional)
+  - d_gradient_lut_:    15,002 bytes (7501 × int16)
+  Total: ~2 MB
+
+Pinned Host Memory (optional):
+  - h_pinned_input_:   771,200 bytes
+  - h_pinned_output_:  614,400 bytes
+  Total: ~1.4 MB
+```
+
+### Performance Targets
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| Kernel execution | <0.2 ms | Pure GPU compute |
+| H2D transfer | ~0.1 ms | 771 KB @ ~8 GB/s |
+| D2H transfer | ~0.08 ms | 614 KB @ ~8 GB/s |
+| End-to-end | <0.5 ms | Including all transfers |
+| Throughput | >60 fps | Sustainable rate |
+
+### Usage
+
+```cpp
+#include "cubeeye_depth_cuda.h"
+
+// Synchronous extraction
+cubeeye::cuda::CudaDepthExtractor extractor(true, true);
+extractor.ExtractDepth(raw_frame, 771200, depth_out, true);
+std::cout << "Time: " << extractor.GetLastTotalTimeMs() << " ms\n";
+
+// Asynchronous (for pipelining)
+extractor.ExtractDepthAsync(raw_frame, 771200, depth_out, true);
+// ... overlap with other work ...
+extractor.Synchronize();
+```
+
+### Benchmark Command
+
+```bash
+./build/test_cubeeye_depth_cuda --benchmark data/raw_frame.bin 1000
+```
 
 ## Verification Strategy
 

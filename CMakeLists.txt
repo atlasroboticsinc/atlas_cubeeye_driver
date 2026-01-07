@@ -281,12 +281,50 @@ target_link_libraries(test_cubeeye_depth PRIVATE
     cubeeye_depth
 )
 
-# CUDA CRT Depth Processing (Phase 4 - only if CUDA is available)
+# CUDA Depth Extraction (only if CUDA is available)
 if(CUDAToolkit_FOUND)
-    # add_executable(crt_depth
-    #     src/crt_depth.cu
-    # )
-    # target_link_libraries(crt_depth PRIVATE
-    #     CUDA::cudart
-    # )
+    message(STATUS "Building CUDA depth extraction kernel")
+
+    # CUDA flags for common architectures
+    # Jetson Orin: SM 8.7, RTX 30xx: SM 8.6, RTX 40xx: SM 8.9, RTX 50xx: SM 12.0
+    set(CMAKE_CUDA_ARCHITECTURES "87;86;89" CACHE STRING "CUDA architectures")
+
+    # CUDA Depth Extraction Library
+    add_library(cubeeye_depth_cuda STATIC
+        src/cubeeye_depth_cuda.cu
+    )
+
+    target_include_directories(cubeeye_depth_cuda PUBLIC
+        src
+    )
+
+    target_link_libraries(cubeeye_depth_cuda PUBLIC
+        CUDA::cudart
+    )
+
+    set_target_properties(cubeeye_depth_cuda PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+
+    # CUDA Test/Benchmark
+    add_executable(test_cubeeye_depth_cuda
+        src/test_cubeeye_depth_cuda.cpp
+    )
+
+    target_link_libraries(test_cubeeye_depth_cuda PRIVATE
+        cubeeye_depth_cuda
+        cubeeye_depth  # CPU reference for comparison
+        CUDA::cudart
+    )
+
+    # Combined CUDA + CPU library for applications
+    add_library(cubeeye_depth_all INTERFACE)
+    target_link_libraries(cubeeye_depth_all INTERFACE
+        cubeeye_depth
+        cubeeye_depth_cuda
+    )
+else()
+    message(STATUS "CUDA not found - GPU depth extraction will not be built")
+    message(STATUS "  Install CUDA Toolkit to enable GPU acceleration")
 endif()

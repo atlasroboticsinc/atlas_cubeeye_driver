@@ -7,7 +7,7 @@ A reverse-engineered depth extraction implementation for the CubeEye I200D Time-
 The CubeEye I200D is a ToF depth sensor that outputs 640x480 depth images at ~30fps. The official SDK (`libCubeEye.so`) is closed-source and performs all depth computation on the CPU. This project reverse-engineers the depth extraction algorithm to enable:
 
 - **Direct V4L2 capture** without SDK dependency
-- **GPU acceleration** via CUDA (planned)
+- **GPU acceleration** via CUDA (implemented)
 - **Custom processing pipelines** for robotics applications
 - **Lower latency** by eliminating SDK overhead
 
@@ -19,6 +19,7 @@ The CubeEye I200D is a ToF depth sensor that outputs 640x480 depth images at ~30
 | Center pixel accuracy | ±1mm typical |
 | Close-range accuracy (<600mm) | ±0.7mm mean error |
 | Full-frame RMSE | ~85mm (includes edge artifacts) |
+| CUDA performance | <0.5ms/frame (target) |
 
 ## Quick Start
 
@@ -32,11 +33,22 @@ sudo apt-get install build-essential cmake
 # Located at: ~/development/atlas/code/atlas_levo/src/3rdparty/drivers/ros2-cubeeye2.0/cubeeye2.0
 ```
 
-### Build
+### Build (CPU only)
 
 ```bash
 mkdir build && cd build
 cmake ..
+make -j$(nproc)
+```
+
+### Build with CUDA (GPU acceleration)
+
+```bash
+# Requires CUDA Toolkit 11.0+
+# Supported architectures: Jetson Orin (SM 8.7), RTX 30xx/40xx (SM 8.6/8.9)
+
+mkdir build && cd build
+cmake -DCMAKE_CUDA_ARCHITECTURES="87;86;89" ..
 make -j$(nproc)
 ```
 
@@ -131,12 +143,18 @@ cubeeye_nano_driver/
 ├── CMakeLists.txt                 # Build configuration
 │
 ├── src/
-│   ├── cubeeye_depth.h            # C++ depth extraction API
-│   ├── cubeeye_depth.cpp          # C++ implementation
-│   ├── test_cubeeye_depth.cpp     # C++ validation test
+│   ├── cubeeye_depth.h            # C++ CPU depth extraction API
+│   ├── cubeeye_depth.cpp          # C++ CPU implementation
+│   ├── cubeeye_depth_cuda.h       # CUDA GPU depth extraction API
+│   ├── cubeeye_depth_cuda.cu      # CUDA kernel implementation
+│   ├── test_cubeeye_depth.cpp     # CPU validation test
+│   ├── test_cubeeye_depth_cuda.cpp # CUDA test/benchmark
 │   ├── simple_v4l2_hook.c         # LD_PRELOAD hook for frame capture
 │   ├── sdk_capture.cpp            # SDK-based capture (ground truth)
 │   └── libusb_capture.c           # Direct USB capture (experimental)
+│
+├── docs/
+│   └── ARCHITECTURE.md            # Technical architecture documentation
 │
 ├── depth_extractor.py             # Python reference implementation
 ├── analyze_hand_test.py           # Multi-frame validation script
@@ -184,6 +202,64 @@ depth = extractor.extract_depth(raw_data, interpolate=True)
 # depth is numpy array, shape (480, 640), dtype uint16, values in mm
 ```
 
+### CUDA API (GPU acceleration)
+
+```cpp
+#include "cubeeye_depth_cuda.h"
+
+// Check CUDA availability
+if (!cubeeye::cuda::CudaDepthExtractor::IsCudaAvailable()) {
+    std::cerr << "CUDA not available" << std::endl;
+    return;
+}
+
+// Create CUDA extractor with pinned memory for optimal transfers
+cubeeye::cuda::CudaDepthExtractor cuda_extractor(
+    true,   // apply_gradient_correction
+    true    // use_pinned_memory
+);
+
+// Synchronous extraction (blocking)
+uint8_t raw_frame[771200];
+uint16_t depth[640 * 480];
+
+bool success = cuda_extractor.ExtractDepth(
+    raw_frame, sizeof(raw_frame),
+    depth, true /* interpolate */
+);
+
+std::cout << "Processing time: " << cuda_extractor.GetLastTotalTimeMs() << " ms\n";
+
+// Asynchronous extraction (non-blocking)
+cuda_extractor.ExtractDepthAsync(raw_frame, sizeof(raw_frame), depth, true);
+// ... do other work ...
+cuda_extractor.Synchronize();  // Wait for completion
+
+// Extract both depth and amplitude
+uint16_t amplitude[640 * 480];
+cuda_extractor.ExtractDepthAndAmplitude(
+    raw_frame, sizeof(raw_frame),
+    depth, amplitude, true
+);
+```
+
+### CUDA Kernel Configuration
+
+```
+Grid:   240 blocks (one per data row)
+Block:  320 threads (one per 5-byte group = 2 pixels)
+Shared: 1,600 bytes per block (depth row data)
+
+Memory footprint:
+  - Device: ~1.5 MB (input + output + LUT)
+  - Pinned host: ~1.4 MB (optional, for faster transfers)
+
+Target performance:
+  - Kernel execution: <0.2 ms
+  - End-to-end (with transfers): <0.5 ms
+  - Throughput: >60 fps sustainable
+```
+
 ## Validation Results
 
 ### Hand Waving Test (98 frames, 200-6400mm range)
@@ -226,7 +302,8 @@ Critical for robot safety and obstacle detection:
 
 ## Future Work
 
-- [ ] CUDA kernel implementation for GPU acceleration
+- [x] CUDA kernel implementation for GPU acceleration
+- [ ] CUDA performance benchmarking on Jetson Orin
 - [ ] Flying pixel filter implementation
 - [ ] ROS2 node integration
 - [ ] Performance benchmarking vs SDK
