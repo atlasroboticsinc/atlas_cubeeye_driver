@@ -37,20 +37,24 @@ perf.data.old
 *_test/
 *_temp/
 *_output/
-trace_*/
-cal_*/
+trace_output_*/
+init_trace_*/
+shutdown_trace_*/
+cal_scan_output/
+cal_intercept_output/
 benchmark/
 extracted_calibration/
 fppn_*/
 gdb_test/
 ruler_temp/
-scripts/
 usb_test_temp/
 variable_dist/
 far_field_benchmark/
 far_raw/
 raw_benchmark/
 calibration_test/
+standalone_capture/
+standalone_capture2/
 
 # Generated images
 *.png

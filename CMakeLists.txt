@@ -72,6 +72,19 @@ target_link_libraries(v4l2_capture PRIVATE
     pthread
 )
 
+# SDK-Free Standalone Capture Tool (no SDK dependency)
+add_executable(cubeeye_standalone_capture
+    src/cubeeye_standalone_capture.cpp
+)
+
+target_include_directories(cubeeye_standalone_capture PRIVATE
+    include
+)
+
+target_link_libraries(cubeeye_standalone_capture PRIVATE
+    pthread
+)
+
 # Benchmark Capture Tool (SDK + Raw via hook)
 add_executable(benchmark_capture
     src/benchmark_capture.cpp
