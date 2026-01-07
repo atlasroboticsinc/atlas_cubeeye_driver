@@ -19,13 +19,16 @@
 #include "cubeeye_depth_cuda.h"
 #include "cubeeye_depth.h"  // CPU reference
 
-using namespace cubeeye;
+// Bring in namespaces
+using cubeeye::DepthExtractor;
+namespace cuda = cubeeye::cuda;
 
-// Test parameters
-constexpr int RAW_FRAME_SIZE = 771200;
-constexpr int OUTPUT_WIDTH = 640;
-constexpr int OUTPUT_HEIGHT = 480;
-constexpr int OUTPUT_SIZE = OUTPUT_WIDTH * OUTPUT_HEIGHT;
+// Use local constants (don't conflict with namespace)
+static constexpr int kRawFrameSize = 771200;
+static constexpr int kOutputWidth = 640;
+static constexpr int kOutputHeight = 480;
+static constexpr int kOutputSize = kOutputWidth * kOutputHeight;
+static constexpr int kMaxDepthMm = 7500;
 
 // Load raw frame from file
 bool LoadRawFrame(const char* path, std::vector<uint8_t>& data) {
@@ -39,8 +42,8 @@ bool LoadRawFrame(const char* path, std::vector<uint8_t>& data) {
     size_t size = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    if (size != RAW_FRAME_SIZE) {
-        std::cerr << "Error: Expected " << RAW_FRAME_SIZE << " bytes, got "
+    if (size != kRawFrameSize) {
+        std::cerr << "Error: Expected " << kRawFrameSize << " bytes, got "
                   << size << std::endl;
         return false;
     }
@@ -62,14 +65,14 @@ bool LoadSDKDepth(const char* path, std::vector<uint16_t>& data) {
     size_t size = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    size_t expected = OUTPUT_SIZE * sizeof(uint16_t);
+    size_t expected = kOutputSize * sizeof(uint16_t);
     if (size != expected) {
         std::cerr << "Error: Expected " << expected << " bytes, got "
                   << size << std::endl;
         return false;
     }
 
-    data.resize(OUTPUT_SIZE);
+    data.resize(kOutputSize);
     file.read(reinterpret_cast<char*>(data.data()), size);
     return true;
 }
@@ -153,8 +156,8 @@ void RunBenchmark(const std::vector<uint8_t>& raw_frame, int iterations) {
     std::cout << std::endl;
 
     // Allocate output buffers
-    std::vector<uint16_t> depth_cuda(OUTPUT_SIZE);
-    std::vector<uint16_t> depth_cpu(OUTPUT_SIZE);
+    std::vector<uint16_t> depth_cuda(kOutputSize);
+    std::vector<uint16_t> depth_cpu(kOutputSize);
 
     // Initialize extractors
     cuda::CudaDepthExtractor cuda_extractor(true, true);
@@ -204,7 +207,7 @@ void RunBenchmark(const std::vector<uint8_t>& raw_frame, int iterations) {
     // Verify CUDA vs CPU results match
     std::cout << "\n---------- Correctness Check ----------" << std::endl;
     Stats stats = CalculateStats(depth_cuda.data(), depth_cpu.data(),
-                                  OUTPUT_WIDTH, OUTPUT_HEIGHT);
+                                  kOutputWidth, kOutputHeight);
     std::cout << "CUDA vs CPU RMSE: " << stats.rmse << " mm" << std::endl;
     std::cout << "CUDA vs CPU correlation: " << std::setprecision(6)
               << stats.correlation << std::endl;
@@ -232,9 +235,9 @@ void RunValidation(const std::vector<uint8_t>& raw_frame,
     std::cout << std::endl;
 
     // Allocate output buffers
-    std::vector<uint16_t> depth_cuda(OUTPUT_SIZE);
-    std::vector<uint16_t> depth_cpu(OUTPUT_SIZE);
-    std::vector<uint16_t> amplitude_cuda(OUTPUT_SIZE);
+    std::vector<uint16_t> depth_cuda(kOutputSize);
+    std::vector<uint16_t> depth_cpu(kOutputSize);
+    std::vector<uint16_t> amplitude_cuda(kOutputSize);
 
     // Initialize extractors
     cuda::CudaDepthExtractor cuda_extractor(true, true);
@@ -253,7 +256,7 @@ void RunValidation(const std::vector<uint8_t>& raw_frame,
     // Compare CUDA vs SDK
     std::cout << "---------- CUDA vs SDK ----------" << std::endl;
     Stats cuda_vs_sdk = CalculateStats(depth_cuda.data(), sdk_depth.data(),
-                                        OUTPUT_WIDTH, OUTPUT_HEIGHT);
+                                        kOutputWidth, kOutputHeight);
     std::cout << "RMSE:        " << std::fixed << std::setprecision(2)
               << cuda_vs_sdk.rmse << " mm" << std::endl;
     std::cout << "Mean error:  " << std::showpos << cuda_vs_sdk.mean_error
@@ -265,14 +268,14 @@ void RunValidation(const std::vector<uint8_t>& raw_frame,
     // Compare CUDA vs CPU
     std::cout << "\n---------- CUDA vs CPU ----------" << std::endl;
     Stats cuda_vs_cpu = CalculateStats(depth_cuda.data(), depth_cpu.data(),
-                                        OUTPUT_WIDTH, OUTPUT_HEIGHT);
+                                        kOutputWidth, kOutputHeight);
     std::cout << "RMSE:        " << std::setprecision(2)
               << cuda_vs_cpu.rmse << " mm" << std::endl;
     std::cout << "Correlation: " << std::setprecision(6)
               << cuda_vs_cpu.correlation << std::endl;
 
     // Center pixel comparison
-    int center_idx = 240 * OUTPUT_WIDTH + 320;
+    int center_idx = 240 * kOutputWidth + 320;
     std::cout << "\n---------- Center Pixel ----------" << std::endl;
     std::cout << "SDK:  " << sdk_depth[center_idx] << " mm" << std::endl;
     std::cout << "CUDA: " << depth_cuda[center_idx] << " mm" << std::endl;
