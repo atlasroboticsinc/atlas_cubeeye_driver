@@ -29,8 +29,6 @@ endif()
 add_library(gstcubeeye SHARED
     plugin.cpp
     gstcubeeyesrc.cpp
-    gstcubeeye_src.cpp
-    gstcubeeye_depth.cpp
 )
 
 target_include_directories(gstcubeeye PRIVATE

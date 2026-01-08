@@ -407,12 +407,14 @@ static gboolean gst_cubeeyesrc_start(GstCubeEyeSrc *self) {
     }
 
     /* Start streaming */
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (xioctl(self->fd, VIDIOC_STREAMON, &type) < 0) {
-        GST_ERROR_OBJECT(self, "VIDIOC_STREAMON failed: %s", strerror(errno));
-        goto error;
+    {
+        enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (xioctl(self->fd, VIDIOC_STREAMON, &type) < 0) {
+            GST_ERROR_OBJECT(self, "VIDIOC_STREAMON failed: %s", strerror(errno));
+            goto error;
+        }
+        self->is_streaming = TRUE;
     }
-    self->is_streaming = TRUE;
 
     /* Initialize depth extractor */
 #ifdef HAVE_CUDA
