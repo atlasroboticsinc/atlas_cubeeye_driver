@@ -346,7 +346,7 @@ if(CUDAToolkit_FOUND)
 
     # CUDA flags for common architectures
     # Jetson Orin: SM 8.7, RTX 30xx: SM 8.6, RTX 40xx: SM 8.9, RTX 50xx: SM 12.0
-    set(CMAKE_CUDA_ARCHITECTURES "87;86;89" CACHE STRING "CUDA architectures")
+    set(CMAKE_CUDA_ARCHITECTURES "87;86;89;120" CACHE STRING "CUDA architectures")
 
     # CUDA Depth Extraction Library
     add_library(cubeeye_depth_cuda STATIC
