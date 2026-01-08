@@ -11,6 +11,7 @@
 #endif
 
 #include <gst/gst.h>
+#include "gstcubeeyesrc.h"
 #include "gstcubeeye_src.h"
 #include "gstcubeeye_depth.h"
 
@@ -20,11 +21,13 @@
 static gboolean plugin_init(GstPlugin *plugin) {
     gboolean ret = TRUE;
 
-    /* Register cubeeye_src element */
+    /* Register cubeeyesrc - combined capture + extraction (recommended) */
+    ret &= gst_element_register(plugin, "cubeeyesrc", GST_RANK_PRIMARY,
+                                 GST_TYPE_CUBEEYESRC);
+
+    /* Register legacy elements (for flexibility/debugging) */
     ret &= gst_element_register(plugin, "cubeeye_src", GST_RANK_NONE,
                                  GST_TYPE_CUBEEYE_SRC);
-
-    /* Register cubeeye_depth element */
     ret &= gst_element_register(plugin, "cubeeye_depth", GST_RANK_NONE,
                                  GST_TYPE_CUBEEYE_DEPTH);
 

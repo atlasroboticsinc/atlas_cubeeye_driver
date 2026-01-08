@@ -28,6 +28,7 @@ endif()
 # GStreamer plugin shared library
 add_library(gstcubeeye SHARED
     plugin.cpp
+    gstcubeeyesrc.cpp
     gstcubeeye_src.cpp
     gstcubeeye_depth.cpp
 )
