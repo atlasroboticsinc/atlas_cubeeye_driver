@@ -4,8 +4,17 @@ project(cubeeye_nano_driver LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# CubeEye SDK paths
-set(CUBEEYE_SDK_PATH "$ENV{HOME}/development/atlas/code/atlas_levo/src/3rdparty/drivers/ros2-cubeeye2.0/cubeeye2.0")
+# CubeEye SDK paths - check both host and container locations
+if(EXISTS "$ENV{HOME}/development/atlas/code/atlas_levo/src/3rdparty/drivers/ros2-cubeeye2.0/cubeeye2.0")
+    # Host machine path
+    set(CUBEEYE_SDK_PATH "$ENV{HOME}/development/atlas/code/atlas_levo/src/3rdparty/drivers/ros2-cubeeye2.0/cubeeye2.0")
+elseif(EXISTS "$ENV{HOME}/code/src/3rdparty/drivers/ros2-cubeeye2.0/cubeeye2.0")
+    # Devcontainer path
+    set(CUBEEYE_SDK_PATH "$ENV{HOME}/code/src/3rdparty/drivers/ros2-cubeeye2.0/cubeeye2.0")
+else()
+    message(WARNING "CubeEye SDK not found - SDK-dependent targets will not be built")
+    set(CUBEEYE_SDK_PATH "")
+endif()
 set(CUBEEYE_INCLUDE_DIR "${CUBEEYE_SDK_PATH}/include")
 set(CUBEEYE_LIB_DIR "${CUBEEYE_SDK_PATH}/lib")
 set(CUBEEYE_OPENCV_LIB_DIR "${CUBEEYE_SDK_PATH}/thirdparty/libopencv/lib")
@@ -340,4 +349,51 @@ if(CUDAToolkit_FOUND)
 else()
     message(STATUS "CUDA not found - GPU depth extraction will not be built")
     message(STATUS "  Install CUDA Toolkit to enable GPU acceleration")
+endif()
+
+# SDK vs Custom Comparison GUI - use SDK's bundled OpenCV to avoid ABI conflicts
+if(CUBEEYE_SDK_PATH)
+    set(CUBEEYE_OPENCV_INCLUDE "${CUBEEYE_SDK_PATH}/thirdparty/libopencv/include")
+
+    add_executable(visualize_comparison
+        src/visualize_comparison.cpp
+        src/cubeeye_depth.cpp
+    )
+
+    target_include_directories(visualize_comparison PRIVATE
+        ${CUBEEYE_INCLUDE_DIR}
+        ${CUBEEYE_OPENCV_INCLUDE}
+        src
+    )
+
+    target_link_directories(visualize_comparison PRIVATE
+        ${CUBEEYE_LIB_DIR}
+        ${CUBEEYE_OPENCV_LIB_DIR}
+        ${CUBEEYE_FFMPEG_LIB_DIR}
+        ${CUBEEYE_LIVE555_LIB_DIR}
+    )
+
+    # Use SDK's bundled OpenCV to match libCubeEye.so ABI
+    # Note: opencv_imgcodecs excluded due to missing libtiff/OpenEXR dependencies
+    target_link_libraries(visualize_comparison PRIVATE
+        CubeEye
+        Live555ClientSource
+        liveMedia
+        BasicUsageEnvironment
+        UsageEnvironment
+        groupsock
+        opencv_core
+        opencv_imgproc
+        opencv_highgui
+        avcodec
+        avutil
+        swscale
+        swresample
+        pthread
+    )
+
+    set_target_properties(visualize_comparison PROPERTIES
+        BUILD_RPATH "${CUBEEYE_LIB_DIR};${CUBEEYE_OPENCV_LIB_DIR};${CUBEEYE_FFMPEG_LIB_DIR};${CUBEEYE_LIVE555_LIB_DIR}"
+        INSTALL_RPATH "${CUBEEYE_LIB_DIR};${CUBEEYE_OPENCV_LIB_DIR};${CUBEEYE_FFMPEG_LIB_DIR};${CUBEEYE_LIVE555_LIB_DIR}"
+    )
 endif()

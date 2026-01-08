@@ -36,6 +36,7 @@ static std::atomic<bool> g_running{true};
 static std::atomic<int> g_frame_count{0};
 static int g_target_frames = 100;
 static std::string g_data_dir = "data";
+static std::atomic<int> g_last_frame_count{0};  // For timeout detection
 
 // Statistics
 static std::vector<float> g_depth_samples;
@@ -132,7 +133,8 @@ public:
                 }
 
                 // Save frames for analysis (paired with Raw in same callback)
-                if (frame_num < 300 && frame->frameDataType() == ms::DataType::U16) {
+                // Note: No frame limit - rely on external cleanup to manage disk space
+                if (frame->frameDataType() == ms::DataType::U16) {
                     auto basic_frame = ms::frame_cast_basic16u(frame);
                     auto data = basic_frame->frameData();
                     std::string filename = g_data_dir + "/sync_depth_" + std::to_string(frame_num) + ".raw";
@@ -169,6 +171,14 @@ public:
                     auto basic_frame = ms::frame_cast_basic16u(frame);
                     auto data = basic_frame->frameData();
                     amplitude_center = static_cast<float>((*data)[center_idx]);
+
+                    // Save amplitude frame
+                    std::string filename = g_data_dir + "/sync_amplitude_" + std::to_string(frame_num) + ".raw";
+                    std::ofstream file(filename, std::ios::binary);
+                    if (file) {
+                        file.write(reinterpret_cast<const char*>(data->data()),
+                                   data->size() * sizeof(uint16_t));
+                    }
                 } else if (frame->frameDataType() == ms::DataType::F32) {
                     auto basic_frame = ms::frame_cast_basic32f(frame);
                     auto data = basic_frame->frameData();
@@ -338,12 +348,21 @@ int main(int argc, char* argv[]) {
     }
 
     // Wait for capture to complete
-    auto start_time = std::chrono::steady_clock::now();
+    auto last_activity_time = std::chrono::steady_clock::now();
+    g_last_frame_count = 0;
+
     while (g_running && g_frame_count < g_target_frames) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // Timeout after 30 seconds
-        auto elapsed = std::chrono::steady_clock::now() - start_time;
+        // Reset timeout if we received new frames
+        int current_count = g_frame_count.load();
+        if (current_count > g_last_frame_count.load()) {
+            g_last_frame_count = current_count;
+            last_activity_time = std::chrono::steady_clock::now();
+        }
+
+        // Timeout after 30 seconds of NO frames
+        auto elapsed = std::chrono::steady_clock::now() - last_activity_time;
         if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() > 30) {
             std::cout << "[Timeout] No frames received in 30 seconds" << std::endl;
             break;

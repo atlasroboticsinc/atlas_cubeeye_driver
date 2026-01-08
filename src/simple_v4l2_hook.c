@@ -21,8 +21,8 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-#define MAX_SAVED_FRAMES 500
 #define MAX_BUFFERS 8
+// No frame limit - rely on external cleanup
 
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_frame_count = 0;
@@ -169,10 +169,7 @@ int ioctl(int fd, unsigned long request, ...) {
 
         pthread_mutex_lock(&g_mutex);
 
-        if (g_frame_count < MAX_SAVED_FRAMES &&
-            buf->index < g_num_buffers &&
-            g_buffers[buf->index]) {
-
+        if (buf->index < g_num_buffers && g_buffers[buf->index]) {
             size_t size = buf->bytesused > 0 ? buf->bytesused : g_buffer_sizes[buf->index];
             save_frame(g_buffers[buf->index], size, g_frame_count);
             g_frame_count++;
