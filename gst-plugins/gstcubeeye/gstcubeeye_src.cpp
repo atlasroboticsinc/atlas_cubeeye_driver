@@ -501,109 +501,115 @@ static GstFlowReturn gst_cubeeye_src_create(GstPushSrc *src, GstBuffer **buf) {
     GstBuffer *outbuf;
     GstMapInfo map;
 
-    /* Wait for frame with timeout */
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(self->fd, &fds);
+    /* Loop until we get a valid frame */
+    while (TRUE) {
+        /* Wait for frame with timeout */
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(self->fd, &fds);
 
-    struct timeval tv;
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
+        struct timeval tv;
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
 
-    int r = select(self->fd + 1, &fds, NULL, NULL, &tv);
-    if (r == -1) {
-        if (errno == EINTR) {
-            return GST_FLOW_OK;  /* Interrupted, try again */
+        int r = select(self->fd + 1, &fds, NULL, NULL, &tv);
+        if (r == -1) {
+            if (errno == EINTR) {
+                continue;  /* Interrupted, try again */
+            }
+            GST_ERROR_OBJECT(self, "select failed: %s", strerror(errno));
+            return GST_FLOW_ERROR;
+        } else if (r == 0) {
+            GST_WARNING_OBJECT(self, "Timeout waiting for frame");
+            return GST_FLOW_ERROR;
         }
-        GST_ERROR_OBJECT(self, "select failed: %s", strerror(errno));
-        return GST_FLOW_ERROR;
-    } else if (r == 0) {
-        GST_WARNING_OBJECT(self, "Timeout waiting for frame");
-        return GST_FLOW_ERROR;
-    }
 
-    /* Dequeue buffer */
-    struct v4l2_buffer v4l2_buf;
-    memset(&v4l2_buf, 0, sizeof(v4l2_buf));
-    v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    v4l2_buf.memory = V4L2_MEMORY_MMAP;
+        /* Dequeue buffer */
+        struct v4l2_buffer v4l2_buf;
+        memset(&v4l2_buf, 0, sizeof(v4l2_buf));
+        v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        v4l2_buf.memory = V4L2_MEMORY_MMAP;
 
-    if (xioctl(self->fd, VIDIOC_DQBUF, &v4l2_buf) < 0) {
-        if (errno == EAGAIN) {
-            return GST_FLOW_OK;  /* No frame available yet */
+        if (xioctl(self->fd, VIDIOC_DQBUF, &v4l2_buf) < 0) {
+            if (errno == EAGAIN) {
+                continue;  /* No frame available yet, try again */
+            }
+            GST_ERROR_OBJECT(self, "VIDIOC_DQBUF failed: %s", strerror(errno));
+            return GST_FLOW_ERROR;
         }
-        GST_ERROR_OBJECT(self, "VIDIOC_DQBUF failed: %s", strerror(errno));
-        return GST_FLOW_ERROR;
-    }
 
-    /* Check frame validity */
-    if (v4l2_buf.bytesused == 0) {
-        /* Empty frame, re-queue and try again */
-        xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf);
+        /* Check frame validity */
+        if (v4l2_buf.bytesused == 0) {
+            /* Empty frame, re-queue and try again */
+            xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf);
+            continue;
+        }
+
+        /* Skip frames that are all zeros (warmup frames) */
+        guint8 *frame_data = (guint8*)self->buffers[v4l2_buf.index].start;
+        gboolean has_data = FALSE;
+        for (guint i = 0; i < 1000 && !has_data; i++) {
+            if (frame_data[i] != 0) has_data = TRUE;
+        }
+
+        if (!has_data) {
+            /* Warmup frame, skip */
+            GST_DEBUG_OBJECT(self, "Skipping warmup frame");
+            xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf);
+            continue;
+        }
+
+        /* Valid frame - process it */
+
+        /* Allocate output buffer */
+        outbuf = gst_buffer_new_allocate(NULL, CUBEEYE_OUT_SIZE, NULL);
+        if (!outbuf) {
+            GST_ERROR_OBJECT(self, "Failed to allocate buffer");
+            xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf);
+            return GST_FLOW_ERROR;
+        }
+
+        /* Copy frame data */
+        gst_buffer_map(outbuf, &map, GST_MAP_WRITE);
+        memcpy(map.data, frame_data, MIN(v4l2_buf.bytesused, CUBEEYE_OUT_SIZE));
+        gst_buffer_unmap(outbuf, &map);
+
+        /* Set timestamps */
+        GstClock *clock = gst_element_get_clock(GST_ELEMENT(self));
+        GstClockTime now = GST_CLOCK_TIME_NONE;
+
+        if (clock) {
+            now = gst_clock_get_time(clock);
+            gst_object_unref(clock);
+        }
+
+        if (self->base_time == GST_CLOCK_TIME_NONE) {
+            self->base_time = now;
+        }
+
+        GstClockTime pts = (now != GST_CLOCK_TIME_NONE && self->base_time != GST_CLOCK_TIME_NONE)
+                           ? (now - self->base_time) : (self->frame_count * GST_SECOND / 15);
+
+        GST_BUFFER_PTS(outbuf) = pts;
+        GST_BUFFER_DTS(outbuf) = pts;
+        GST_BUFFER_DURATION(outbuf) = GST_SECOND / 15;  /* ~66.7ms at 15fps */
+        GST_BUFFER_OFFSET(outbuf) = self->frame_count;
+        GST_BUFFER_OFFSET_END(outbuf) = self->frame_count + 1;
+
+        self->frame_count++;
+        self->last_frame_time = now;
+
+        /* Re-queue V4L2 buffer */
+        if (xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf) < 0) {
+            GST_WARNING_OBJECT(self, "VIDIOC_QBUF failed: %s", strerror(errno));
+        }
+
+        GST_LOG_OBJECT(self, "Captured frame %lu, pts=%" GST_TIME_FORMAT,
+                       (unsigned long)self->frame_count, GST_TIME_ARGS(pts));
+
+        *buf = outbuf;
         return GST_FLOW_OK;
-    }
-
-    /* Skip frames that are all zeros (warmup frames) */
-    guint8 *frame_data = (guint8*)self->buffers[v4l2_buf.index].start;
-    gboolean has_data = FALSE;
-    for (guint i = 0; i < 1000 && !has_data; i++) {
-        if (frame_data[i] != 0) has_data = TRUE;
-    }
-
-    if (!has_data) {
-        /* Warmup frame, skip */
-        xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf);
-        return GST_FLOW_OK;
-    }
-
-    /* Allocate output buffer */
-    outbuf = gst_buffer_new_allocate(NULL, CUBEEYE_OUT_SIZE, NULL);
-    if (!outbuf) {
-        GST_ERROR_OBJECT(self, "Failed to allocate buffer");
-        xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf);
-        return GST_FLOW_ERROR;
-    }
-
-    /* Copy frame data */
-    gst_buffer_map(outbuf, &map, GST_MAP_WRITE);
-    memcpy(map.data, frame_data, MIN(v4l2_buf.bytesused, CUBEEYE_OUT_SIZE));
-    gst_buffer_unmap(outbuf, &map);
-
-    /* Set timestamps */
-    GstClock *clock = gst_element_get_clock(GST_ELEMENT(self));
-    GstClockTime now = GST_CLOCK_TIME_NONE;
-
-    if (clock) {
-        now = gst_clock_get_time(clock);
-        gst_object_unref(clock);
-    }
-
-    if (self->base_time == GST_CLOCK_TIME_NONE) {
-        self->base_time = now;
-    }
-
-    GstClockTime pts = (now != GST_CLOCK_TIME_NONE && self->base_time != GST_CLOCK_TIME_NONE)
-                       ? (now - self->base_time) : (self->frame_count * GST_SECOND / 15);
-
-    GST_BUFFER_PTS(outbuf) = pts;
-    GST_BUFFER_DTS(outbuf) = pts;
-    GST_BUFFER_DURATION(outbuf) = GST_SECOND / 15;  /* ~66.7ms at 15fps */
-    GST_BUFFER_OFFSET(outbuf) = self->frame_count;
-    GST_BUFFER_OFFSET_END(outbuf) = self->frame_count + 1;
-
-    self->frame_count++;
-    self->last_frame_time = now;
-
-    /* Re-queue V4L2 buffer */
-    if (xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf) < 0) {
-        GST_WARNING_OBJECT(self, "VIDIOC_QBUF failed: %s", strerror(errno));
-    }
-
-    GST_LOG_OBJECT(self, "Captured frame %lu, pts=%" GST_TIME_FORMAT,
-                   (unsigned long)self->frame_count, GST_TIME_ARGS(pts));
-
-    *buf = outbuf;
-    return GST_FLOW_OK;
+    }  /* end while(TRUE) */
 }
 
 /* Unlock (for flushing) */
