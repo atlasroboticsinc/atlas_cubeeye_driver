@@ -373,12 +373,29 @@ class ComparisonGUI:
         return colored
 
     def amplitude_to_gray(self, amplitude_frame):
-        """Convert amplitude to grayscale image"""
+        """Convert amplitude to grayscale image with auto-scaling"""
         if amplitude_frame is None:
             return np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
 
-        # Normalize amplitude (typically 0-4095 for 12-bit)
-        normalized = np.clip(amplitude_frame.astype(np.float32) / 4095 * 255, 0, 255).astype(np.uint8)
+        # Use auto-scaling based on actual values (like CubeEyeShell does)
+        # Ignore zero values for range calculation
+        valid_mask = amplitude_frame > 0
+        if not np.any(valid_mask):
+            return np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
+
+        valid_values = amplitude_frame[valid_mask]
+        min_val = np.percentile(valid_values, 1)   # 1st percentile to ignore outliers
+        max_val = np.percentile(valid_values, 99)  # 99th percentile to ignore outliers
+
+        # Ensure some range
+        if max_val <= min_val:
+            max_val = min_val + 1
+
+        # Normalize to 0-255
+        normalized = (amplitude_frame.astype(np.float32) - min_val) / (max_val - min_val) * 255
+        normalized = np.clip(normalized, 0, 255).astype(np.uint8)
+        normalized[~valid_mask] = 0  # Keep zeros as black
+
         return cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
 
     def compute_diff_image(self, sdk_depth, custom_depth):
@@ -437,19 +454,34 @@ class ComparisonGUI:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         y_pos += 25
-        sdk_val = self.sdk_depth[cy, cx_adj] if self.sdk_depth is not None else 0
-        custom_val = self.custom_depth[cy, cx_adj] if self.custom_depth is not None else 0
-        diff = abs(int(sdk_val) - int(custom_val))
+        if self.view_mode == 'depth':
+            sdk_val = self.sdk_depth[cy, cx_adj] if self.sdk_depth is not None else 0
+            custom_val = self.custom_depth[cy, cx_adj] if self.custom_depth is not None else 0
+            diff = abs(int(sdk_val) - int(custom_val))
+            unit = "mm"
+            diff_thresholds = (10, 50)  # green < 10, orange < 50, red >= 50
 
-        cv2.putText(image, f"SDK Depth: {sdk_val} mm", (10, y_pos),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        y_pos += 20
-        cv2.putText(image, f"Custom Depth: {custom_val} mm", (10, y_pos),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+            cv2.putText(image, f"SDK Depth: {sdk_val} {unit}", (10, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            y_pos += 20
+            cv2.putText(image, f"Custom Depth: {custom_val} {unit}", (10, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+        else:  # amplitude mode
+            sdk_val = self.sdk_amplitude[cy, cx_adj] if self.sdk_amplitude is not None else 0
+            custom_val = self.custom_amplitude[cy, cx_adj] if self.custom_amplitude is not None else 0
+            diff = abs(int(sdk_val) - int(custom_val))
+            unit = ""
+            diff_thresholds = (100, 500)  # amplitude typically has larger values
+
+            cv2.putText(image, f"SDK Amp: {sdk_val} {unit}", (10, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            y_pos += 20
+            cv2.putText(image, f"Custom Amp: {custom_val} {unit}", (10, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
         y_pos += 20
 
-        diff_color = (0, 255, 0) if diff < 10 else (0, 165, 255) if diff < 50 else (0, 0, 255)
-        cv2.putText(image, f"Difference: {diff} mm", (10, y_pos),
+        diff_color = (0, 255, 0) if diff < diff_thresholds[0] else (0, 165, 255) if diff < diff_thresholds[1] else (0, 0, 255)
+        cv2.putText(image, f"Difference: {diff}", (10, y_pos),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, diff_color, 1)
 
         y_pos += 25
