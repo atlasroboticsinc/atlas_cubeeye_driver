@@ -139,8 +139,58 @@ gst-launch-1.0 cubeeyesrc serial=I200DU2509000349 enable-amplitude=true normaliz
 - [x] Phase 2: GStreamer source element
 - [x] Phase 3: CUDA depth transform element
 - [x] Phase 4: Plugin registration & build
-- [ ] Phase 5: Multi-camera testing
-- [ ] Phase 6: Atlas integration
+- [x] Phase 5: Multi-camera testing (validated - one sensor has hardware issue)
+- [x] Phase 6: Atlas integration (DS3D dataloader)
+
+## Atlas DS3D Integration
+
+CubeEye dataloader is integrated into `atlas_ds3d_components` for DeepStream 3D pipeline:
+
+**Location:** `atlas_levo/src/perception/atlas_ds3d_components/`
+
+### DS3D Dataloader Files
+```
+include/atlas_ds3d_components/dataloaders/
+├── cubeeye_device.hpp      # Device enumeration, UVC control, calibration readout
+├── cubeeye_kernels.hpp     # CUDA kernel declarations
+└── cubeeye_loader.hpp      # DS3D DataLoader class
+
+src/dataloaders/
+├── cubeeye_device.cpp      # Device enumeration implementation
+├── cubeeye_kernels.cu      # CUDA depth extraction + point cloud generation
+└── cubeeye_loader.cpp      # DS3D DataLoader implementation
+
+src/parameters/
+└── cubeeye_loader.yaml     # Configuration schema
+```
+
+### DS3D Features
+- **Automatic intrinsics readout** from sensor calibration page 0x0005
+- **Fused CUDA kernel** for depth extraction + point cloud generation
+- **Organized point cloud** output (640x480 with invalid points = z=0)
+- **Multi-camera support** via serial number selection
+
+### DS3D Output Keys
+| Key | Type | Description |
+|-----|------|-------------|
+| `DS3D::LidarXYZI` | float4* (GPU) | Organized point cloud (640x480) |
+| `DS3D::CubeEyeDepth` | uint16_t* (GPU) | Depth image in mm |
+| `DS3D::CubeEyeAmplitude` | uint16_t* (GPU) | Amplitude image |
+
+### DS3D Usage Example
+```yaml
+source_definitions:
+  cubeeye_front:
+    type: dataloader
+    library: libatlas_ds3d_dataloader_cubeeye.so
+    create_function: createCubeEyeLoader
+    config:
+      serial: "I200DU2509000349"
+      frame_id: "cubeeye_front_optical"
+      pointcloud_key: "DS3D::CubeEyeFront"
+      max_depth_mm: 5000
+      min_amplitude: 50
+```
 
 ## Related Files
 
