@@ -553,8 +553,53 @@ static GstStateChangeReturn gst_cubeeyesrc_change_state(GstElement *element,
     return ret;
 }
 
+static gboolean gst_cubeeyesrc_send_stream_events(GstCubeEyeSrc *self, GstPad *pad,
+                                                    const gchar *stream_id_suffix) {
+    /* Create and send stream-start event */
+    gchar *stream_id = gst_pad_create_stream_id(pad, GST_ELEMENT(self), stream_id_suffix);
+    GstEvent *stream_start = gst_event_new_stream_start(stream_id);
+    gst_event_set_group_id(stream_start, gst_util_group_id_next());
+    g_free(stream_id);
+
+    if (!gst_pad_push_event(pad, stream_start)) {
+        GST_WARNING_OBJECT(self, "Failed to push stream-start on %s", GST_PAD_NAME(pad));
+        return FALSE;
+    }
+
+    /* Create and send caps event */
+    GstCaps *caps = gst_caps_new_simple("video/x-raw",
+        "format", G_TYPE_STRING, "GRAY16_LE",
+        "width", G_TYPE_INT, CUBEEYESRC_OUT_WIDTH,
+        "height", G_TYPE_INT, CUBEEYESRC_OUT_HEIGHT,
+        "framerate", GST_TYPE_FRACTION, 15, 1,
+        NULL);
+
+    if (!gst_pad_push_event(pad, gst_event_new_caps(caps))) {
+        GST_WARNING_OBJECT(self, "Failed to push caps on %s", GST_PAD_NAME(pad));
+        gst_caps_unref(caps);
+        return FALSE;
+    }
+    gst_caps_unref(caps);
+
+    /* Create and send segment event */
+    GstSegment segment;
+    gst_segment_init(&segment, GST_FORMAT_TIME);
+    segment.rate = 1.0;
+    segment.start = 0;
+    segment.time = 0;
+
+    if (!gst_pad_push_event(pad, gst_event_new_segment(&segment))) {
+        GST_WARNING_OBJECT(self, "Failed to push segment on %s", GST_PAD_NAME(pad));
+        return FALSE;
+    }
+
+    GST_DEBUG_OBJECT(self, "Stream events sent on %s", GST_PAD_NAME(pad));
+    return TRUE;
+}
+
 static gpointer gst_cubeeyesrc_thread_func(gpointer data) {
     GstCubeEyeSrc *self = GST_CUBEEYESRC(data);
+    gboolean events_sent = FALSE;
 
     GST_DEBUG_OBJECT(self, "Streaming thread started");
 
@@ -648,6 +693,22 @@ static gpointer gst_cubeeyesrc_thread_func(gpointer data) {
                 if (val > (guint32)max_val) val = max_val;
                 self->priv->depth_buffer[i] = (uint16_t)((val * 65535) / max_val);
             }
+        }
+
+        /* Send stream events before first buffer */
+        if (!events_sent) {
+            if (!gst_cubeeyesrc_send_stream_events(self, self->depth_pad, "depth")) {
+                GST_ERROR_OBJECT(self, "Failed to send depth stream events");
+                break;
+            }
+            if (extract_amp && self->amplitude_pad) {
+                if (!gst_cubeeyesrc_send_stream_events(self, self->amplitude_pad, "amplitude")) {
+                    GST_ERROR_OBJECT(self, "Failed to send amplitude stream events");
+                    break;
+                }
+            }
+            events_sent = TRUE;
+            GST_INFO_OBJECT(self, "Stream events sent, starting data flow");
         }
 
         /* Get timestamp */
