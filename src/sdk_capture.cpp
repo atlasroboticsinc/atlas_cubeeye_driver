@@ -43,6 +43,7 @@ struct FilterConfig {
     bool phase_noise_filter = false;
     bool scattering_filter = false;
     bool auto_exposure = true;
+    bool depth_undistortion = false;
     int amplitude_threshold_min = 0;
     int amplitude_threshold_max = 65535;
     int integration_time = 1000;
@@ -58,6 +59,7 @@ struct FilterConfig {
                phase_noise_filter == other.phase_noise_filter &&
                scattering_filter == other.scattering_filter &&
                auto_exposure == other.auto_exposure &&
+               depth_undistortion == other.depth_undistortion &&
                amplitude_threshold_min == other.amplitude_threshold_min &&
                amplitude_threshold_max == other.amplitude_threshold_max &&
                integration_time == other.integration_time &&
@@ -329,6 +331,7 @@ bool parse_filter_config(const std::string& filename, FilterConfig& config) {
         else if (key == "phase_noise_filter") config.phase_noise_filter = (value == "1" || value == "true");
         else if (key == "scattering_filter") config.scattering_filter = (value == "1" || value == "true");
         else if (key == "auto_exposure") config.auto_exposure = (value == "1" || value == "true");
+        else if (key == "depth_undistortion") config.depth_undistortion = (value == "1" || value == "true");
         else if (key == "amplitude_threshold_min") config.amplitude_threshold_min = std::stoi(value);
         else if (key == "amplitude_threshold_max") config.amplitude_threshold_max = std::stoi(value);
         else if (key == "integration_time") config.integration_time = std::stoi(value);
@@ -372,6 +375,7 @@ void apply_filter_config(ms::sptr_camera camera, const FilterConfig& config) {
     set_bool("phase_noise_filter", config.phase_noise_filter);
     set_bool("scattering_filter", config.scattering_filter);
     set_bool("auto_exposure", config.auto_exposure);
+    set_bool("depth_undistortion", config.depth_undistortion);
 
     // Apply numeric parameters
     set_u16("amplitude_threshold_min", config.amplitude_threshold_min);

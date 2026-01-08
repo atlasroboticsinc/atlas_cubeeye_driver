@@ -66,6 +66,7 @@ class FilterConfig:
         self.phase_noise_filter = False
         self.scattering_filter = False
         self.auto_exposure = True
+        self.depth_undistortion = False  # SDK undistortion
         # Numeric parameters
         self.amplitude_threshold_min = 0
         self.amplitude_threshold_max = 65535
@@ -85,6 +86,7 @@ class FilterConfig:
             f.write(f"phase_noise_filter={1 if self.phase_noise_filter else 0}\n")
             f.write(f"scattering_filter={1 if self.scattering_filter else 0}\n")
             f.write(f"auto_exposure={1 if self.auto_exposure else 0}\n")
+            f.write(f"depth_undistortion={1 if self.depth_undistortion else 0}\n")
             f.write(f"amplitude_threshold_min={self.amplitude_threshold_min}\n")
             f.write(f"amplitude_threshold_max={self.amplitude_threshold_max}\n")
             f.write(f"integration_time={self.integration_time}\n")
@@ -102,6 +104,7 @@ class FilterConfig:
         if self.phase_noise_filter: status.append("PhNs")
         if self.scattering_filter: status.append("Scat")
         if self.auto_exposure: status.append("AE")
+        if self.depth_undistortion: status.append("Undist")
         return " ".join(status) if status else "None"
 
 
@@ -327,10 +330,11 @@ class ComparisonGUI:
     """Side-by-side comparison GUI for SDK vs Custom extraction"""
 
     def __init__(self):
-        self.extractor = FastDepthExtractor(apply_gradient_correction=True)
+        self.extractor = FastDepthExtractor(apply_gradient_correction=True, apply_undistortion=False)
         self.sdk_capture = None
         self.temp_dir = Path("/tmp/cubeeye_comparison")
         self.filter_config = FilterConfig()
+        self.our_undistortion = False  # Our driver's undistortion state
 
         # Current frames
         self.sdk_depth = None
@@ -403,9 +407,9 @@ class ComparisonGUI:
         """Draw info panel on image"""
         h, w = image.shape[:2]
 
-        # Semi-transparent background (taller to show filter info)
+        # Semi-transparent background (taller to show filter info + undistortion)
         overlay = image.copy()
-        cv2.rectangle(overlay, (5, 5), (280, 260), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (5, 5), (280, 280), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, image, 0.3, 0, image)
 
         # Cursor position and values
@@ -481,6 +485,12 @@ class ComparisonGUI:
         cv2.putText(image, f"  AmpMin:{self.filter_config.amplitude_threshold_min} IntT:{self.filter_config.integration_time}",
                     (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
+        # Our undistortion status
+        y_pos += 18
+        undist_color = (0, 255, 0) if self.our_undistortion else (100, 100, 100)
+        cv2.putText(image, f"Our Undist: {'ON' if self.our_undistortion else 'OFF'}",
+                    (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.4, undist_color, 1)
+
         return image
 
     def draw_crosshair(self, image):
@@ -555,6 +565,8 @@ class ComparisonGUI:
         print("  4: Toggle Phase Noise Filter")
         print("  5: Toggle Scattering Filter")
         print("  6: Toggle Auto Exposure")
+        print("  7: Toggle SDK Undistortion")
+        print("  8: Toggle Our Undistortion")
         print("  +/-: Adjust Amplitude Threshold Min")
         print("  [/]: Adjust Integration Time")
         print()
@@ -620,9 +632,9 @@ class ComparisonGUI:
             display = self.draw_crosshair(display)
 
             # Controls at bottom
-            cv2.putText(display, "D:depth/amp  C:colormap  S:save  Q:quit  |  1-6:filters  +/-:ampMin  [/]:intTime",
+            cv2.putText(display, "D:depth/amp  C:colormap  S:save  Q:quit  |  1-6:filters  7:SDK-undist  8:our-undist  +/-:ampMin",
                        (10, display.shape[0] - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
 
             self.update_fps()
             self.frame_count += 1
@@ -692,6 +704,14 @@ class ComparisonGUI:
                 self.filter_config.integration_time = max(100, self.filter_config.integration_time - 50)
                 self.sdk_capture.update_filter_config()
                 print(f"Integration Time: {self.filter_config.integration_time}")
+            elif key == ord('7'):
+                self.filter_config.depth_undistortion = not self.filter_config.depth_undistortion
+                self.sdk_capture.update_filter_config()
+                print(f"SDK Depth Undistortion: {'ON' if self.filter_config.depth_undistortion else 'OFF'}")
+            elif key == ord('8'):
+                self.our_undistortion = not self.our_undistortion
+                self.extractor.set_undistortion(self.our_undistortion)
+                print(f"Our Undistortion: {'ON' if self.our_undistortion else 'OFF'}")
 
         # Cleanup
         print("\nStopping...")

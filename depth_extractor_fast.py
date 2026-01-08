@@ -5,6 +5,22 @@ Optimized for real-time performance using NumPy vectorization
 """
 
 import numpy as np
+import cv2
+
+# Camera intrinsics extracted from calibration page 0x0005
+# Note: These are for 640x480 resolution
+INTRINSICS = {
+    'fx': 393.25,
+    'fy': 393.42,
+    'cx': 321.48,
+    'cy': 239.92,
+    # Distortion coefficients (k1, k2, p1, p2, k3)
+    'k1': -0.270483,
+    'k2': 0.106138,
+    'p1': -0.023670,
+    'p2': 0.0,  # Not provided, assume 0
+    'k3': 0.0,  # Not provided, assume 0
+}
 
 # Polynomial coefficients for gradient correction
 GRADIENT_COEFFS = [
@@ -27,10 +43,17 @@ GRADIENT_COEFFS = [
 class FastDepthExtractor:
     """Vectorized depth extractor for real-time performance"""
 
-    def __init__(self, apply_gradient_correction=True, max_depth_mm=7500):
+    def __init__(self, apply_gradient_correction=True, apply_undistortion=False, max_depth_mm=7500):
         self.apply_gradient = apply_gradient_correction
+        self.apply_undistortion = apply_undistortion
         self.max_depth = max_depth_mm
         self.gradient_lut = self._build_gradient_lut()
+
+        # Precompute undistortion maps for efficiency
+        self._undistort_map1 = None
+        self._undistort_map2 = None
+        if apply_undistortion:
+            self._init_undistortion_maps()
 
     def _build_gradient_lut(self):
         """Build lookup table for gradient correction"""
@@ -42,6 +65,64 @@ class FastDepthExtractor:
             correction = correction * depths + coeff
 
         return (correction * 1000.0).astype(np.int16)
+
+    def _init_undistortion_maps(self, width=640, height=480):
+        """
+        Precompute undistortion remap tables for efficient real-time processing.
+
+        Uses cv2.initUndistortRectifyMap to create lookup tables that can be
+        reused for every frame, avoiding the overhead of cv2.undistort().
+        """
+        # Build camera matrix
+        camera_matrix = np.array([
+            [INTRINSICS['fx'], 0, INTRINSICS['cx']],
+            [0, INTRINSICS['fy'], INTRINSICS['cy']],
+            [0, 0, 1]
+        ], dtype=np.float64)
+
+        # Build distortion coefficients (k1, k2, p1, p2, k3)
+        dist_coeffs = np.array([
+            INTRINSICS['k1'],
+            INTRINSICS['k2'],
+            INTRINSICS['p1'],
+            INTRINSICS['p2'],
+            INTRINSICS['k3']
+        ], dtype=np.float64)
+
+        # Compute optimal new camera matrix (alpha=0 means no black borders)
+        new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(
+            camera_matrix, dist_coeffs, (width, height), alpha=0
+        )
+
+        # Precompute undistortion maps
+        self._undistort_map1, self._undistort_map2 = cv2.initUndistortRectifyMap(
+            camera_matrix, dist_coeffs, None, new_camera_matrix,
+            (width, height), cv2.CV_16SC2
+        )
+
+    def undistort_frame(self, frame):
+        """
+        Apply undistortion to a depth or amplitude frame.
+
+        Args:
+            frame: Input frame (uint16, 640x480)
+
+        Returns:
+            Undistorted frame (uint16, 640x480)
+        """
+        if self._undistort_map1 is None or self._undistort_map2 is None:
+            self._init_undistortion_maps(frame.shape[1], frame.shape[0])
+
+        # cv2.remap requires the maps and uses INTER_NEAREST for depth to avoid
+        # interpolation artifacts (which would create invalid depth values)
+        return cv2.remap(frame, self._undistort_map1, self._undistort_map2,
+                        interpolation=cv2.INTER_NEAREST)
+
+    def set_undistortion(self, enable):
+        """Enable or disable undistortion"""
+        if enable and self._undistort_map1 is None:
+            self._init_undistortion_maps()
+        self.apply_undistortion = enable
 
     def extract_depth(self, raw_frame_bytes, interpolate=True):
         """
@@ -100,6 +181,10 @@ class FastDepthExtractor:
         if interpolate:
             depth_frame = np.repeat(depth_frame, 2, axis=0)
 
+        # Apply undistortion if enabled
+        if self.apply_undistortion:
+            depth_frame = self.undistort_frame(depth_frame)
+
         return depth_frame
 
     def extract_amplitude(self, raw_frame_bytes, interpolate=True):
@@ -130,6 +215,10 @@ class FastDepthExtractor:
 
         if interpolate:
             amp_frame = np.repeat(amp_frame, 2, axis=0)
+
+        # Apply undistortion if enabled
+        if self.apply_undistortion:
+            amp_frame = self.undistort_frame(amp_frame)
 
         return amp_frame
 
