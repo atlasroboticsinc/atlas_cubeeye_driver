@@ -22,6 +22,16 @@ Controls:
     C: Cycle colormap
     S: Save comparison frame
     Q/ESC: Quit
+
+    SDK Filter Controls:
+    1: Toggle Flying Pixel Filter
+    2: Toggle Median Filter
+    3: Toggle Outlier Remove Filter
+    4: Toggle Phase Noise Filter
+    5: Toggle Scattering Filter
+    6: Toggle Auto Exposure
+    +/-: Adjust Amplitude Threshold Min
+    [/]: Adjust Integration Time
 """
 
 import sys
@@ -45,6 +55,56 @@ OUTPUT_HEIGHT = 480
 RAW_FRAME_SIZE = 771200
 MAX_DEPTH_MM = 7500
 
+
+class FilterConfig:
+    """SDK filter configuration"""
+    def __init__(self):
+        # Boolean filters
+        self.flying_pixel_remove_filter = True
+        self.median_filter = False
+        self.outlier_remove_filter = True
+        self.phase_noise_filter = False
+        self.scattering_filter = False
+        self.auto_exposure = True
+        # Numeric parameters
+        self.amplitude_threshold_min = 0
+        self.amplitude_threshold_max = 65535
+        self.integration_time = 1000
+        self.flying_pixel_remove_threshold = 3000
+        self.scattering_filter_threshold = 700
+        self.depth_range_min = 150
+        self.depth_range_max = 65535
+
+    def write_to_file(self, filepath):
+        """Write config to file in key=value format"""
+        with open(filepath, 'w') as f:
+            f.write(f"# SDK Filter Configuration\n")
+            f.write(f"flying_pixel_remove_filter={1 if self.flying_pixel_remove_filter else 0}\n")
+            f.write(f"median_filter={1 if self.median_filter else 0}\n")
+            f.write(f"outlier_remove_filter={1 if self.outlier_remove_filter else 0}\n")
+            f.write(f"phase_noise_filter={1 if self.phase_noise_filter else 0}\n")
+            f.write(f"scattering_filter={1 if self.scattering_filter else 0}\n")
+            f.write(f"auto_exposure={1 if self.auto_exposure else 0}\n")
+            f.write(f"amplitude_threshold_min={self.amplitude_threshold_min}\n")
+            f.write(f"amplitude_threshold_max={self.amplitude_threshold_max}\n")
+            f.write(f"integration_time={self.integration_time}\n")
+            f.write(f"flying_pixel_remove_threshold={self.flying_pixel_remove_threshold}\n")
+            f.write(f"scattering_filter_threshold={self.scattering_filter_threshold}\n")
+            f.write(f"depth_range_min={self.depth_range_min}\n")
+            f.write(f"depth_range_max={self.depth_range_max}\n")
+
+    def get_filter_status_str(self):
+        """Get compact status string for display"""
+        status = []
+        if self.flying_pixel_remove_filter: status.append("FlyPx")
+        if self.median_filter: status.append("Med")
+        if self.outlier_remove_filter: status.append("Outl")
+        if self.phase_noise_filter: status.append("PhNs")
+        if self.scattering_filter: status.append("Scat")
+        if self.auto_exposure: status.append("AE")
+        return " ".join(status) if status else "None"
+
+
 COLORMAPS = [
     ('JET', cv2.COLORMAP_JET),
     ('TURBO', cv2.COLORMAP_TURBO),
@@ -56,7 +116,7 @@ COLORMAPS = [
 class SDKCaptureProcess:
     """Manages SDK capture subprocess with V4L2 hook"""
 
-    def __init__(self, output_dir):
+    def __init__(self, output_dir, filter_config=None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.process = None
@@ -71,6 +131,10 @@ class SDKCaptureProcess:
         self.last_raw_frame_num = -1
         self.last_sdk_frame_num = -1
         self.last_sdk_amp_frame_num = -1
+
+        # Filter configuration
+        self.filter_config = filter_config or FilterConfig()
+        self.config_file = self.output_dir / "filter_config.txt"
 
     def start(self, num_frames=999999):
         """Start SDK capture with V4L2 hook"""
@@ -99,11 +163,15 @@ class SDKCaptureProcess:
             str(sdk_path / "thirdparty/liblive555/lib/Release"),
         ]
 
+        # Write initial filter config
+        self.filter_config.write_to_file(self.config_file)
+
         # Set up environment with hook and SDK libraries
         env = os.environ.copy()
         env['LD_PRELOAD'] = str(self.hook_lib)
         env['HOOK_OUTPUT'] = str(self.output_dir)  # Hook uses HOOK_OUTPUT
         env['LD_LIBRARY_PATH'] = ':'.join(lib_paths) + ':' + env.get('LD_LIBRARY_PATH', '')
+        env['SDK_FILTER_CONFIG'] = str(self.config_file)  # Filter config file
 
         # Start SDK capture
         self.process = subprocess.Popen(
@@ -132,6 +200,10 @@ class SDKCaptureProcess:
                     print(f"[SDK] {line.decode().strip()}")
             except:
                 break
+
+    def update_filter_config(self):
+        """Write current filter config to file (triggers SDK reload)"""
+        self.filter_config.write_to_file(self.config_file)
 
     def stop(self):
         """Stop SDK capture"""
@@ -258,6 +330,7 @@ class ComparisonGUI:
         self.extractor = FastDepthExtractor(apply_gradient_correction=True)
         self.sdk_capture = None
         self.temp_dir = Path("/tmp/cubeeye_comparison")
+        self.filter_config = FilterConfig()
 
         # Current frames
         self.sdk_depth = None
@@ -330,9 +403,9 @@ class ComparisonGUI:
         """Draw info panel on image"""
         h, w = image.shape[:2]
 
-        # Semi-transparent background
+        # Semi-transparent background (taller to show filter info)
         overlay = image.copy()
-        cv2.rectangle(overlay, (5, 5), (280, 200), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (5, 5), (280, 260), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, image, 0.3, 0, image)
 
         # Cursor position and values
@@ -396,6 +469,18 @@ class ComparisonGUI:
             cv2.putText(image, f"Avg Center Diff: {mean_diff:.1f} mm", (10, y_pos),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
+        # Filter status
+        y_pos += 25
+        cv2.putText(image, "SDK Filters:", (10, y_pos),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 100), 1)
+        y_pos += 18
+        filter_str = self.filter_config.get_filter_status_str()
+        cv2.putText(image, f"  {filter_str}", (10, y_pos),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        y_pos += 18
+        cv2.putText(image, f"  AmpMin:{self.filter_config.amplitude_threshold_min} IntT:{self.filter_config.integration_time}",
+                    (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
         return image
 
     def draw_crosshair(self, image):
@@ -432,8 +517,8 @@ class ComparisonGUI:
         print("CubeEye SDK vs Custom Driver Comparison")
         print("=" * 60)
 
-        # Start SDK capture
-        self.sdk_capture = SDKCaptureProcess(self.temp_dir)
+        # Start SDK capture with filter config
+        self.sdk_capture = SDKCaptureProcess(self.temp_dir, self.filter_config)
         try:
             self.sdk_capture.start()
         except FileNotFoundError as e:
@@ -463,6 +548,15 @@ class ComparisonGUI:
         print("  C: Cycle colormap")
         print("  S: Save comparison frame")
         print("  Q/ESC: Quit")
+        print("\nSDK Filter Controls:")
+        print("  1: Toggle Flying Pixel Filter")
+        print("  2: Toggle Median Filter")
+        print("  3: Toggle Outlier Remove Filter")
+        print("  4: Toggle Phase Noise Filter")
+        print("  5: Toggle Scattering Filter")
+        print("  6: Toggle Auto Exposure")
+        print("  +/-: Adjust Amplitude Threshold Min")
+        print("  [/]: Adjust Integration Time")
         print()
 
         cleanup_counter = 0
@@ -526,7 +620,7 @@ class ComparisonGUI:
             display = self.draw_crosshair(display)
 
             # Controls at bottom
-            cv2.putText(display, "D:depth/amp  C:colormap  S:save  Q:quit",
+            cv2.putText(display, "D:depth/amp  C:colormap  S:save  Q:quit  |  1-6:filters  +/-:ampMin  [/]:intTime",
                        (10, display.shape[0] - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
 
@@ -557,6 +651,47 @@ class ComparisonGUI:
                 filename = f"comparison_{self.frame_count:05d}.png"
                 cv2.imwrite(filename, display)
                 print(f"Saved: {filename}")
+            # Filter controls
+            elif key == ord('1'):
+                self.filter_config.flying_pixel_remove_filter = not self.filter_config.flying_pixel_remove_filter
+                self.sdk_capture.update_filter_config()
+                print(f"Flying Pixel Filter: {'ON' if self.filter_config.flying_pixel_remove_filter else 'OFF'}")
+            elif key == ord('2'):
+                self.filter_config.median_filter = not self.filter_config.median_filter
+                self.sdk_capture.update_filter_config()
+                print(f"Median Filter: {'ON' if self.filter_config.median_filter else 'OFF'}")
+            elif key == ord('3'):
+                self.filter_config.outlier_remove_filter = not self.filter_config.outlier_remove_filter
+                self.sdk_capture.update_filter_config()
+                print(f"Outlier Remove Filter: {'ON' if self.filter_config.outlier_remove_filter else 'OFF'}")
+            elif key == ord('4'):
+                self.filter_config.phase_noise_filter = not self.filter_config.phase_noise_filter
+                self.sdk_capture.update_filter_config()
+                print(f"Phase Noise Filter: {'ON' if self.filter_config.phase_noise_filter else 'OFF'}")
+            elif key == ord('5'):
+                self.filter_config.scattering_filter = not self.filter_config.scattering_filter
+                self.sdk_capture.update_filter_config()
+                print(f"Scattering Filter: {'ON' if self.filter_config.scattering_filter else 'OFF'}")
+            elif key == ord('6'):
+                self.filter_config.auto_exposure = not self.filter_config.auto_exposure
+                self.sdk_capture.update_filter_config()
+                print(f"Auto Exposure: {'ON' if self.filter_config.auto_exposure else 'OFF'}")
+            elif key == ord('+') or key == ord('='):
+                self.filter_config.amplitude_threshold_min = min(255, self.filter_config.amplitude_threshold_min + 10)
+                self.sdk_capture.update_filter_config()
+                print(f"Amplitude Threshold Min: {self.filter_config.amplitude_threshold_min}")
+            elif key == ord('-') or key == ord('_'):
+                self.filter_config.amplitude_threshold_min = max(0, self.filter_config.amplitude_threshold_min - 10)
+                self.sdk_capture.update_filter_config()
+                print(f"Amplitude Threshold Min: {self.filter_config.amplitude_threshold_min}")
+            elif key == ord(']'):
+                self.filter_config.integration_time = min(2000, self.filter_config.integration_time + 50)
+                self.sdk_capture.update_filter_config()
+                print(f"Integration Time: {self.filter_config.integration_time}")
+            elif key == ord('['):
+                self.filter_config.integration_time = max(100, self.filter_config.integration_time - 50)
+                self.sdk_capture.update_filter_config()
+                print(f"Integration Time: {self.filter_config.integration_time}")
 
         # Cleanup
         print("\nStopping...")

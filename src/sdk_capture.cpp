@@ -28,8 +28,50 @@
 #include "CubeEye/CubeEyeSink.h"
 #include "CubeEye/CubeEyeCamera.h"
 #include "CubeEye/CubeEyeBasicFrame.h"
+#include "CubeEye/CubeEyeProperty.h"
+#include <sys/stat.h>
+#include <sstream>
+#include <map>
 
 namespace ms = meere::sensor;
+
+// Filter configuration
+struct FilterConfig {
+    bool flying_pixel_remove_filter = true;
+    bool median_filter = false;
+    bool outlier_remove_filter = true;
+    bool phase_noise_filter = false;
+    bool scattering_filter = false;
+    bool auto_exposure = true;
+    int amplitude_threshold_min = 0;
+    int amplitude_threshold_max = 65535;
+    int integration_time = 1000;
+    int flying_pixel_remove_threshold = 3000;
+    int scattering_filter_threshold = 700;
+    int depth_range_min = 150;
+    int depth_range_max = 65535;
+
+    bool operator==(const FilterConfig& other) const {
+        return flying_pixel_remove_filter == other.flying_pixel_remove_filter &&
+               median_filter == other.median_filter &&
+               outlier_remove_filter == other.outlier_remove_filter &&
+               phase_noise_filter == other.phase_noise_filter &&
+               scattering_filter == other.scattering_filter &&
+               auto_exposure == other.auto_exposure &&
+               amplitude_threshold_min == other.amplitude_threshold_min &&
+               amplitude_threshold_max == other.amplitude_threshold_max &&
+               integration_time == other.integration_time &&
+               flying_pixel_remove_threshold == other.flying_pixel_remove_threshold &&
+               scattering_filter_threshold == other.scattering_filter_threshold &&
+               depth_range_min == other.depth_range_min &&
+               depth_range_max == other.depth_range_max;
+    }
+    bool operator!=(const FilterConfig& other) const { return !(*this == other); }
+};
+
+static FilterConfig g_filter_config;
+static std::string g_config_file;
+static time_t g_config_mtime = 0;
 
 // Global state
 static std::atomic<bool> g_running{true};
@@ -256,6 +298,115 @@ void print_statistics() {
     std::cout << "\n==========================" << std::endl;
 }
 
+// Parse filter config from file (simple key=value format)
+bool parse_filter_config(const std::string& filename, FilterConfig& config) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#') continue;
+
+        auto eq_pos = line.find('=');
+        if (eq_pos == std::string::npos) continue;
+
+        std::string key = line.substr(0, eq_pos);
+        std::string value = line.substr(eq_pos + 1);
+
+        // Trim whitespace
+        key.erase(0, key.find_first_not_of(" \t"));
+        key.erase(key.find_last_not_of(" \t") + 1);
+        value.erase(0, value.find_first_not_of(" \t"));
+        value.erase(value.find_last_not_of(" \t") + 1);
+
+        // Parse values
+        if (key == "flying_pixel_remove_filter") config.flying_pixel_remove_filter = (value == "1" || value == "true");
+        else if (key == "median_filter") config.median_filter = (value == "1" || value == "true");
+        else if (key == "outlier_remove_filter") config.outlier_remove_filter = (value == "1" || value == "true");
+        else if (key == "phase_noise_filter") config.phase_noise_filter = (value == "1" || value == "true");
+        else if (key == "scattering_filter") config.scattering_filter = (value == "1" || value == "true");
+        else if (key == "auto_exposure") config.auto_exposure = (value == "1" || value == "true");
+        else if (key == "amplitude_threshold_min") config.amplitude_threshold_min = std::stoi(value);
+        else if (key == "amplitude_threshold_max") config.amplitude_threshold_max = std::stoi(value);
+        else if (key == "integration_time") config.integration_time = std::stoi(value);
+        else if (key == "flying_pixel_remove_threshold") config.flying_pixel_remove_threshold = std::stoi(value);
+        else if (key == "scattering_filter_threshold") config.scattering_filter_threshold = std::stoi(value);
+        else if (key == "depth_range_min") config.depth_range_min = std::stoi(value);
+        else if (key == "depth_range_max") config.depth_range_max = std::stoi(value);
+    }
+
+    return true;
+}
+
+// Apply filter configuration to camera via SDK
+void apply_filter_config(ms::sptr_camera camera, const FilterConfig& config) {
+    std::cout << "[Filter] Applying filter configuration..." << std::endl;
+
+    // Boolean properties
+    auto set_bool = [&](const char* name, bool value) {
+        auto prop = ms::make_property_bool(name, value);
+        if (camera->setProperty(prop) == ms::result::success) {
+            std::cout << "  " << name << " = " << (value ? "ON" : "OFF") << std::endl;
+        } else {
+            std::cerr << "  Failed to set " << name << std::endl;
+        }
+    };
+
+    // U16 properties
+    auto set_u16 = [&](const char* name, int value) {
+        auto prop = ms::make_property_16u(name, static_cast<uint16_t>(value));
+        if (camera->setProperty(prop) == ms::result::success) {
+            std::cout << "  " << name << " = " << value << std::endl;
+        } else {
+            std::cerr << "  Failed to set " << name << std::endl;
+        }
+    };
+
+    // Apply boolean filters
+    set_bool("flying_pixel_remove_filter", config.flying_pixel_remove_filter);
+    set_bool("median_filter", config.median_filter);
+    set_bool("outlier_remove_filter", config.outlier_remove_filter);
+    set_bool("phase_noise_filter", config.phase_noise_filter);
+    set_bool("scattering_filter", config.scattering_filter);
+    set_bool("auto_exposure", config.auto_exposure);
+
+    // Apply numeric parameters
+    set_u16("amplitude_threshold_min", config.amplitude_threshold_min);
+    set_u16("amplitude_threshold_max", config.amplitude_threshold_max);
+    set_u16("integration_time", config.integration_time);
+    set_u16("flying_pixel_remove_threshold", config.flying_pixel_remove_threshold);
+    set_u16("scattering_filter_threshold", config.scattering_filter_threshold);
+    set_u16("depth_range_min", config.depth_range_min);
+    set_u16("depth_range_max", config.depth_range_max);
+
+    std::cout << "[Filter] Configuration applied." << std::endl;
+}
+
+// Check if config file changed and reload if needed
+bool check_and_reload_config(ms::sptr_camera camera) {
+    if (g_config_file.empty()) return false;
+
+    struct stat st;
+    if (stat(g_config_file.c_str(), &st) != 0) return false;
+
+    if (st.st_mtime != g_config_mtime) {
+        g_config_mtime = st.st_mtime;
+
+        FilterConfig new_config;
+        if (parse_filter_config(g_config_file, new_config)) {
+            if (new_config != g_filter_config) {
+                g_filter_config = new_config;
+                apply_filter_config(camera, g_filter_config);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 int main(int argc, char* argv[]) {
     // Parse arguments
     if (argc > 1) {
@@ -271,6 +422,13 @@ int main(int argc, char* argv[]) {
     // Setup signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+
+    // Get config file path from environment
+    const char* config_env = getenv("SDK_FILTER_CONFIG");
+    if (config_env) {
+        g_config_file = config_env;
+        std::cout << "Filter config file: " << g_config_file << std::endl;
+    }
 
     // Search for camera
     std::cout << "[Search] Looking for CubeEye cameras..." << std::endl;
@@ -336,6 +494,19 @@ int main(int argc, char* argv[]) {
                   << ", cy=" << intrinsic.principal.cy << std::endl;
     }
 
+    // Load and apply initial filter config if provided
+    if (!g_config_file.empty()) {
+        if (parse_filter_config(g_config_file, g_filter_config)) {
+            struct stat st;
+            if (stat(g_config_file.c_str(), &st) == 0) {
+                g_config_mtime = st.st_mtime;
+            }
+            apply_filter_config(camera, g_filter_config);
+        } else {
+            std::cout << "[Filter] No config file found, using SDK defaults" << std::endl;
+        }
+    }
+
     // Start capture
     std::cout << "\n[Run] Starting capture (Raw + Depth + Amplitude)..." << std::endl;
     int wanted_frames = ms::FrameType::Raw | ms::FrameType::Depth | ms::FrameType::Amplitude;
@@ -360,6 +531,9 @@ int main(int argc, char* argv[]) {
             g_last_frame_count = current_count;
             last_activity_time = std::chrono::steady_clock::now();
         }
+
+        // Check for filter config changes (poll every 100ms)
+        check_and_reload_config(camera);
 
         // Timeout after 30 seconds of NO frames
         auto elapsed = std::chrono::steady_clock::now() - last_activity_time;
