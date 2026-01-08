@@ -434,3 +434,21 @@ if(CUBEEYE_SDK_PATH)
         INSTALL_RPATH "${CUBEEYE_LIB_DIR};${CUBEEYE_OPENCV_LIB_DIR};${CUBEEYE_FFMPEG_LIB_DIR};${CUBEEYE_LIVE555_LIB_DIR}"
     )
 endif()
+
+# =============================================================================
+# GStreamer Plugin
+# =============================================================================
+
+# Check if GStreamer is available
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(GST QUIET gstreamer-1.0)
+endif()
+
+if(GST_FOUND)
+    message(STATUS "GStreamer found: ${GST_VERSION}")
+    add_subdirectory(gst-plugins/gstcubeeye)
+else()
+    message(STATUS "GStreamer not found - GStreamer plugin will not be built")
+    message(STATUS "  Install libgstreamer1.0-dev to enable GStreamer support")
+endif()
