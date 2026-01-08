@@ -12,6 +12,7 @@
 
 #include <gst/gst.h>
 #include "gstcubeeye_src.h"
+#include "gstcubeeye_depth.h"
 
 #define PACKAGE "gstcubeeye"
 #define VERSION "1.0.0"
@@ -23,9 +24,9 @@ static gboolean plugin_init(GstPlugin *plugin) {
     ret &= gst_element_register(plugin, "cubeeye_src", GST_RANK_NONE,
                                  GST_TYPE_CUBEEYE_SRC);
 
-    /* Future: Register cubeeye_depth element */
-    /* ret &= gst_element_register(plugin, "cubeeye_depth", GST_RANK_NONE,
-                                    GST_TYPE_CUBEEYE_DEPTH); */
+    /* Register cubeeye_depth element */
+    ret &= gst_element_register(plugin, "cubeeye_depth", GST_RANK_NONE,
+                                 GST_TYPE_CUBEEYE_DEPTH);
 
     return ret;
 }
