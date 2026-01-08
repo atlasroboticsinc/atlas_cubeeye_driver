@@ -52,12 +52,14 @@ enum {
     PROP_GRADIENT_CORRECTION,
     PROP_NORMALIZE,
     PROP_MAX_DEPTH,
+    PROP_MAX_AMPLITUDE,
 };
 
 #define DEFAULT_ENABLE_AMP      FALSE
 #define DEFAULT_GRADIENT_CORR   TRUE
 #define DEFAULT_NORMALIZE       FALSE
 #define DEFAULT_MAX_DEPTH       5000
+#define DEFAULT_MAX_AMPLITUDE   1000
 
 /* Pad templates */
 static GstStaticPadTemplate depth_src_template = GST_STATIC_PAD_TEMPLATE(
@@ -153,6 +155,12 @@ static void gst_cubeeyesrc_class_init(GstCubeEyeSrcClass *klass) {
             100, 10000, DEFAULT_MAX_DEPTH,
             (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+    g_object_class_install_property(gobject_class, PROP_MAX_AMPLITUDE,
+        g_param_spec_int("max-amplitude", "Max Amplitude",
+            "Maximum amplitude value (for normalization)",
+            10, 4095, DEFAULT_MAX_AMPLITUDE,
+            (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
     /* Element metadata */
     gst_element_class_set_static_metadata(element_class,
         "CubeEye ToF Camera Source",
@@ -184,6 +192,7 @@ static void gst_cubeeyesrc_init(GstCubeEyeSrc *self) {
     self->gradient_correction = DEFAULT_GRADIENT_CORR;
     self->normalize = DEFAULT_NORMALIZE;
     self->max_depth = DEFAULT_MAX_DEPTH;
+    self->max_amplitude = DEFAULT_MAX_AMPLITUDE;
 
     /* State */
     self->fd = -1;
@@ -266,6 +275,9 @@ static void gst_cubeeyesrc_set_property(GObject *object, guint prop_id,
         case PROP_MAX_DEPTH:
             self->max_depth = g_value_get_int(value);
             break;
+        case PROP_MAX_AMPLITUDE:
+            self->max_amplitude = g_value_get_int(value);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -294,6 +306,9 @@ static void gst_cubeeyesrc_get_property(GObject *object, guint prop_id,
             break;
         case PROP_MAX_DEPTH:
             g_value_set_int(value, self->max_depth);
+            break;
+        case PROP_MAX_AMPLITUDE:
+            g_value_set_int(value, self->max_amplitude);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -692,6 +707,17 @@ static gpointer gst_cubeeyesrc_thread_func(gpointer data) {
                 guint32 val = self->priv->depth_buffer[i];
                 if (val > (guint32)max_val) val = max_val;
                 self->priv->depth_buffer[i] = (uint16_t)((val * 65535) / max_val);
+            }
+        }
+
+        /* Apply normalization to amplitude */
+        if (self->normalize && extract_amp) {
+            gint max_val = self->max_amplitude;
+            gint num_pixels = CUBEEYESRC_OUT_WIDTH * CUBEEYESRC_OUT_HEIGHT;
+            for (gint i = 0; i < num_pixels; i++) {
+                guint32 val = self->priv->amplitude_buffer[i];
+                if (val > (guint32)max_val) val = max_val;
+                self->priv->amplitude_buffer[i] = (uint16_t)((val * 65535) / max_val);
             }
         }
 

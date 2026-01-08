@@ -62,6 +62,7 @@ struct _GstCubeEyeSrc {
     gboolean gradient_correction;
     gboolean normalize;
     gint max_depth;
+    gint max_amplitude;
 
     /* V4L2 state */
     gint fd;
