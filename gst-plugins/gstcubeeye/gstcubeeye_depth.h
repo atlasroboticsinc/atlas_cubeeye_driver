@@ -52,6 +52,8 @@ struct _GstCubeEyeDepth {
     gboolean enable_amplitude;
     gboolean gradient_correction;
     gboolean interpolate;
+    gint max_depth;              /* Max depth in mm for normalization */
+    gboolean normalize;          /* Scale output to full 16-bit range for display */
 
     /* Output dimensions */
     gint output_width;

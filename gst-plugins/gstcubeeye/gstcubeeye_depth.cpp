@@ -43,6 +43,8 @@ enum {
     PROP_ENABLE_AMPLITUDE,
     PROP_GRADIENT_CORRECTION,
     PROP_INTERPOLATE,
+    PROP_MAX_DEPTH,
+    PROP_NORMALIZE,
 };
 
 /* Pad templates */
@@ -128,6 +130,16 @@ static void gst_cubeeye_depth_class_init(GstCubeEyeDepthClass *klass) {
             "2x vertical interpolation (240->480)",
             TRUE, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+    g_object_class_install_property(gobject_class, PROP_MAX_DEPTH,
+        g_param_spec_int("max-depth", "Max Depth",
+            "Maximum depth in mm (for normalization)",
+            100, 10000, 5000, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+    g_object_class_install_property(gobject_class, PROP_NORMALIZE,
+        g_param_spec_boolean("normalize", "Normalize",
+            "Scale depth to full 16-bit range for display (0-max_depth -> 0-65535)",
+            FALSE, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
     /* Element metadata */
     gst_element_class_set_static_metadata(element_class,
         "CubeEye Depth Extraction",
@@ -160,6 +172,8 @@ static void gst_cubeeye_depth_init(GstCubeEyeDepth *self) {
     self->enable_amplitude = FALSE;
     self->gradient_correction = TRUE;
     self->interpolate = TRUE;
+    self->max_depth = 5000;
+    self->normalize = FALSE;
     self->output_width = CUBEEYE_DEPTH_OUT_WIDTH;
     self->output_height = CUBEEYE_DEPTH_OUT_HEIGHT_480;
 
@@ -219,6 +233,12 @@ static void gst_cubeeye_depth_set_property(GObject *object, guint prop_id,
             self->output_height = self->interpolate ?
                 CUBEEYE_DEPTH_OUT_HEIGHT_480 : CUBEEYE_DEPTH_OUT_HEIGHT_240;
             break;
+        case PROP_MAX_DEPTH:
+            self->max_depth = g_value_get_int(value);
+            break;
+        case PROP_NORMALIZE:
+            self->normalize = g_value_get_boolean(value);
+            break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
             break;
@@ -241,6 +261,12 @@ static void gst_cubeeye_depth_get_property(GObject *object, guint prop_id,
             break;
         case PROP_INTERPOLATE:
             g_value_set_boolean(value, self->interpolate);
+            break;
+        case PROP_MAX_DEPTH:
+            g_value_set_int(value, self->max_depth);
+            break;
+        case PROP_NORMALIZE:
+            g_value_set_boolean(value, self->normalize);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -455,6 +481,19 @@ static GstFlowReturn gst_cubeeye_depth_transform(GstBaseTransform *trans,
             success = self->priv->cpu_extractor->ExtractDepth(
                 in_map.data, in_map.size,
                 (uint16_t *)out_map.data, interpolate);
+        }
+    }
+
+    /* Apply normalization if enabled (scale 0-max_depth to 0-65535 for display) */
+    if (success && self->normalize) {
+        uint16_t *depth_data = (uint16_t *)out_map.data;
+        gint num_pixels = self->output_width * self->output_height;
+        gint max_depth = self->max_depth;
+
+        for (gint i = 0; i < num_pixels; i++) {
+            guint32 val = depth_data[i];
+            if (val > (guint32)max_depth) val = max_depth;
+            depth_data[i] = (uint16_t)((val * 65535) / max_depth);
         }
     }
 
