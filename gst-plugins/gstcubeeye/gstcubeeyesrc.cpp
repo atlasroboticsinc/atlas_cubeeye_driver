@@ -1,7 +1,7 @@
 /**
  * gstcubeeyesrc.cpp - CubeEye I200D ToF Camera GStreamer Source Element
  *
- * Combined V4L2 capture + depth extraction in a single element.
+ * Multi-pad source with separate depth and amplitude outputs.
  *
  * Copyright (c) 2025 Atlas Robotics Inc.
  */
@@ -38,7 +38,9 @@ struct _GstCubeEyeSrcPrivate {
     gboolean cuda_available;
 #endif
     cubeeye::DepthExtractor *cpu_extractor;
-    uint8_t *raw_buffer;  /* Temp buffer for raw frame */
+    uint8_t *raw_buffer;
+    uint16_t *depth_buffer;
+    uint16_t *amplitude_buffer;
 };
 
 /* Properties */
@@ -46,35 +48,20 @@ enum {
     PROP_0,
     PROP_SERIAL,
     PROP_DEVICE,
-    PROP_OUTPUT_TYPE,
+    PROP_ENABLE_AMPLITUDE,
     PROP_GRADIENT_CORRECTION,
     PROP_NORMALIZE,
     PROP_MAX_DEPTH,
 };
 
-#define DEFAULT_OUTPUT_TYPE     CUBEEYESRC_OUTPUT_DEPTH
+#define DEFAULT_ENABLE_AMP      FALSE
 #define DEFAULT_GRADIENT_CORR   TRUE
 #define DEFAULT_NORMALIZE       FALSE
 #define DEFAULT_MAX_DEPTH       5000
 
-/* Output type enum registration */
-#define GST_TYPE_CUBEEYESRC_OUTPUT_TYPE (gst_cubeeyesrc_output_type_get_type())
-static GType gst_cubeeyesrc_output_type_get_type(void) {
-    static GType type = 0;
-    if (!type) {
-        static const GEnumValue values[] = {
-            { CUBEEYESRC_OUTPUT_DEPTH, "Output depth", "depth" },
-            { CUBEEYESRC_OUTPUT_AMPLITUDE, "Output amplitude", "amplitude" },
-            { 0, NULL, NULL }
-        };
-        type = g_enum_register_static("GstCubeEyeSrcOutputType", values);
-    }
-    return type;
-}
-
-/* Pad template */
-static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE(
-    "src",
+/* Pad templates */
+static GstStaticPadTemplate depth_src_template = GST_STATIC_PAD_TEMPLATE(
+    "depth",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS(
@@ -86,8 +73,21 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE(
     )
 );
 
+static GstStaticPadTemplate amplitude_src_template = GST_STATIC_PAD_TEMPLATE(
+    "amplitude",
+    GST_PAD_SRC,
+    GST_PAD_SOMETIMES,
+    GST_STATIC_CAPS(
+        "video/x-raw, "
+        "format = (string) GRAY16_LE, "
+        "width = (int) 640, "
+        "height = (int) 480, "
+        "framerate = (fraction) 15/1"
+    )
+);
+
 #define gst_cubeeyesrc_parent_class parent_class
-G_DEFINE_TYPE_WITH_PRIVATE(GstCubeEyeSrc, gst_cubeeyesrc, GST_TYPE_PUSH_SRC);
+G_DEFINE_TYPE_WITH_PRIVATE(GstCubeEyeSrc, gst_cubeeyesrc, GST_TYPE_ELEMENT);
 
 /* Forward declarations */
 static void gst_cubeeyesrc_set_property(GObject *object, guint prop_id,
@@ -95,11 +95,9 @@ static void gst_cubeeyesrc_set_property(GObject *object, guint prop_id,
 static void gst_cubeeyesrc_get_property(GObject *object, guint prop_id,
                                          GValue *value, GParamSpec *pspec);
 static void gst_cubeeyesrc_finalize(GObject *object);
-static gboolean gst_cubeeyesrc_start(GstBaseSrc *src);
-static gboolean gst_cubeeyesrc_stop(GstBaseSrc *src);
-static GstCaps *gst_cubeeyesrc_get_caps(GstBaseSrc *src, GstCaps *filter);
-static gboolean gst_cubeeyesrc_set_caps(GstBaseSrc *src, GstCaps *caps);
-static GstFlowReturn gst_cubeeyesrc_create(GstPushSrc *src, GstBuffer **buf);
+static GstStateChangeReturn gst_cubeeyesrc_change_state(GstElement *element,
+                                                         GstStateChange transition);
+static gpointer gst_cubeeyesrc_thread_func(gpointer data);
 
 /* Helper for ioctl with retry */
 static int xioctl(int fd, unsigned long request, void *arg) {
@@ -113,8 +111,6 @@ static int xioctl(int fd, unsigned long request, void *arg) {
 static void gst_cubeeyesrc_class_init(GstCubeEyeSrcClass *klass) {
     GObjectClass *gobject_class = G_OBJECT_CLASS(klass);
     GstElementClass *element_class = GST_ELEMENT_CLASS(klass);
-    GstBaseSrcClass *basesrc_class = GST_BASE_SRC_CLASS(klass);
-    GstPushSrcClass *pushsrc_class = GST_PUSH_SRC_CLASS(klass);
 
     GST_DEBUG_CATEGORY_INIT(gst_cubeeyesrc_debug, "cubeeyesrc", 0,
                             "CubeEye I200D ToF Camera Source");
@@ -122,6 +118,8 @@ static void gst_cubeeyesrc_class_init(GstCubeEyeSrcClass *klass) {
     gobject_class->set_property = gst_cubeeyesrc_set_property;
     gobject_class->get_property = gst_cubeeyesrc_get_property;
     gobject_class->finalize = gst_cubeeyesrc_finalize;
+
+    element_class->change_state = GST_DEBUG_FUNCPTR(gst_cubeeyesrc_change_state);
 
     /* Properties */
     g_object_class_install_property(gobject_class, PROP_SERIAL,
@@ -134,11 +132,10 @@ static void gst_cubeeyesrc_class_init(GstCubeEyeSrcClass *klass) {
             "V4L2 device path (auto-detected from serial if not set)",
             NULL, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
-    g_object_class_install_property(gobject_class, PROP_OUTPUT_TYPE,
-        g_param_spec_enum("output-type", "Output Type",
-            "Type of output (depth or amplitude)",
-            GST_TYPE_CUBEEYESRC_OUTPUT_TYPE, DEFAULT_OUTPUT_TYPE,
-            (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+    g_object_class_install_property(gobject_class, PROP_ENABLE_AMPLITUDE,
+        g_param_spec_boolean("enable-amplitude", "Enable Amplitude",
+            "Enable amplitude output pad",
+            DEFAULT_ENABLE_AMP, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
     g_object_class_install_property(gobject_class, PROP_GRADIENT_CORRECTION,
         g_param_spec_boolean("gradient-correction", "Gradient Correction",
@@ -147,7 +144,7 @@ static void gst_cubeeyesrc_class_init(GstCubeEyeSrcClass *klass) {
 
     g_object_class_install_property(gobject_class, PROP_NORMALIZE,
         g_param_spec_boolean("normalize", "Normalize",
-            "Scale output to full 16-bit range for display",
+            "Scale depth to full 16-bit range for display",
             DEFAULT_NORMALIZE, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
     g_object_class_install_property(gobject_class, PROP_MAX_DEPTH,
@@ -160,28 +157,30 @@ static void gst_cubeeyesrc_class_init(GstCubeEyeSrcClass *klass) {
     gst_element_class_set_static_metadata(element_class,
         "CubeEye ToF Camera Source",
         "Source/Video",
-        "Captures depth/amplitude from CubeEye I200D ToF camera",
+        "Captures depth and amplitude from CubeEye I200D ToF camera",
         "Atlas Robotics Inc.");
 
-    gst_element_class_add_static_pad_template(element_class, &src_template);
-
-    /* Virtual methods */
-    basesrc_class->start = GST_DEBUG_FUNCPTR(gst_cubeeyesrc_start);
-    basesrc_class->stop = GST_DEBUG_FUNCPTR(gst_cubeeyesrc_stop);
-    basesrc_class->get_caps = GST_DEBUG_FUNCPTR(gst_cubeeyesrc_get_caps);
-    basesrc_class->set_caps = GST_DEBUG_FUNCPTR(gst_cubeeyesrc_set_caps);
-    pushsrc_class->create = GST_DEBUG_FUNCPTR(gst_cubeeyesrc_create);
+    /* Pad templates */
+    gst_element_class_add_static_pad_template(element_class, &depth_src_template);
+    gst_element_class_add_static_pad_template(element_class, &amplitude_src_template);
 }
 
 static void gst_cubeeyesrc_init(GstCubeEyeSrc *self) {
     self->priv = (GstCubeEyeSrcPrivate *)
         gst_cubeeyesrc_get_instance_private(self);
 
+    /* Create depth pad (always present) */
+    self->depth_pad = gst_pad_new_from_static_template(&depth_src_template, "depth");
+    gst_pad_set_active(self->depth_pad, TRUE);
+    gst_element_add_pad(GST_ELEMENT(self), self->depth_pad);
+
+    /* Amplitude pad created dynamically when enabled */
+    self->amplitude_pad = NULL;
+
     /* Default property values */
     self->serial = NULL;
     self->device = NULL;
-    self->device_index = -1;
-    self->output_type = DEFAULT_OUTPUT_TYPE;
+    self->enable_amplitude = DEFAULT_ENABLE_AMP;
     self->gradient_correction = DEFAULT_GRADIENT_CORR;
     self->normalize = DEFAULT_NORMALIZE;
     self->max_depth = DEFAULT_MAX_DEPTH;
@@ -194,6 +193,11 @@ static void gst_cubeeyesrc_init(GstCubeEyeSrc *self) {
     self->frame_count = 0;
     self->base_time = GST_CLOCK_TIME_NONE;
 
+    /* Thread */
+    self->thread = NULL;
+    self->running = FALSE;
+    g_mutex_init(&self->lock);
+
     /* Private */
     self->priv->cpu_extractor = NULL;
 #ifdef HAVE_CUDA
@@ -201,31 +205,25 @@ static void gst_cubeeyesrc_init(GstCubeEyeSrc *self) {
     self->priv->cuda_available = FALSE;
 #endif
     self->priv->raw_buffer = NULL;
-
-    /* Live source */
-    gst_base_src_set_live(GST_BASE_SRC(self), TRUE);
-    gst_base_src_set_format(GST_BASE_SRC(self), GST_FORMAT_TIME);
+    self->priv->depth_buffer = NULL;
+    self->priv->amplitude_buffer = NULL;
 }
 
 static void gst_cubeeyesrc_finalize(GObject *object) {
     GstCubeEyeSrc *self = GST_CUBEEYESRC(object);
 
+    g_mutex_clear(&self->lock);
     g_free(self->serial);
     g_free(self->device);
 
-    if (self->priv->raw_buffer) {
-        g_free(self->priv->raw_buffer);
-    }
+    if (self->priv->raw_buffer) g_free(self->priv->raw_buffer);
+    if (self->priv->depth_buffer) g_free(self->priv->depth_buffer);
+    if (self->priv->amplitude_buffer) g_free(self->priv->amplitude_buffer);
 
 #ifdef HAVE_CUDA
-    if (self->priv->cuda_extractor) {
-        delete self->priv->cuda_extractor;
-    }
+    if (self->priv->cuda_extractor) delete self->priv->cuda_extractor;
 #endif
-
-    if (self->priv->cpu_extractor) {
-        delete self->priv->cpu_extractor;
-    }
+    if (self->priv->cpu_extractor) delete self->priv->cpu_extractor;
 
     G_OBJECT_CLASS(parent_class)->finalize(object);
 }
@@ -243,8 +241,18 @@ static void gst_cubeeyesrc_set_property(GObject *object, guint prop_id,
             g_free(self->device);
             self->device = g_value_dup_string(value);
             break;
-        case PROP_OUTPUT_TYPE:
-            self->output_type = (GstCubeEyeSrcOutputType)g_value_get_enum(value);
+        case PROP_ENABLE_AMPLITUDE:
+            self->enable_amplitude = g_value_get_boolean(value);
+            /* Add/remove amplitude pad */
+            if (self->enable_amplitude && !self->amplitude_pad) {
+                self->amplitude_pad = gst_pad_new_from_static_template(
+                    &amplitude_src_template, "amplitude");
+                gst_pad_set_active(self->amplitude_pad, TRUE);
+                gst_element_add_pad(GST_ELEMENT(self), self->amplitude_pad);
+            } else if (!self->enable_amplitude && self->amplitude_pad) {
+                gst_element_remove_pad(GST_ELEMENT(self), self->amplitude_pad);
+                self->amplitude_pad = NULL;
+            }
             break;
         case PROP_GRADIENT_CORRECTION:
             self->gradient_correction = g_value_get_boolean(value);
@@ -275,8 +283,8 @@ static void gst_cubeeyesrc_get_property(GObject *object, guint prop_id,
         case PROP_DEVICE:
             g_value_set_string(value, self->device);
             break;
-        case PROP_OUTPUT_TYPE:
-            g_value_set_enum(value, self->output_type);
+        case PROP_ENABLE_AMPLITUDE:
+            g_value_set_boolean(value, self->enable_amplitude);
             break;
         case PROP_GRADIENT_CORRECTION:
             g_value_set_boolean(value, self->gradient_correction);
@@ -293,8 +301,7 @@ static void gst_cubeeyesrc_get_property(GObject *object, guint prop_id,
     }
 }
 
-static gboolean gst_cubeeyesrc_start(GstBaseSrc *src) {
-    GstCubeEyeSrc *self = GST_CUBEEYESRC(src);
+static gboolean gst_cubeeyesrc_start(GstCubeEyeSrc *self) {
     std::string device_path;
 
     GST_DEBUG_OBJECT(self, "Starting cubeeyesrc");
@@ -312,15 +319,13 @@ static gboolean gst_cubeeyesrc_start(GstBaseSrc *src) {
     } else if (self->device && strlen(self->device) > 0) {
         device_path = self->device;
     } else {
-        /* Find first available CubeEye */
         auto devices = cubeeye::DeviceEnumerator::enumerate();
         if (devices.empty()) {
             GST_ERROR_OBJECT(self, "No CubeEye devices found");
             return FALSE;
         }
         device_path = devices[0].device_path;
-        GST_INFO_OBJECT(self, "Using first available device: %s (serial: %s)",
-                        device_path.c_str(), devices[0].serial_number.c_str());
+        GST_INFO_OBJECT(self, "Using first available device: %s", device_path.c_str());
     }
 
     /* Open device */
@@ -427,9 +432,15 @@ static gboolean gst_cubeeyesrc_start(GstBaseSrc *src) {
 
     self->priv->cpu_extractor = new cubeeye::DepthExtractor(self->gradient_correction);
     self->priv->raw_buffer = (uint8_t *)g_malloc(CUBEEYESRC_RAW_SIZE);
+    self->priv->depth_buffer = (uint16_t *)g_malloc(CUBEEYESRC_OUT_SIZE);
+    self->priv->amplitude_buffer = (uint16_t *)g_malloc(CUBEEYESRC_OUT_SIZE);
 
     self->frame_count = 0;
     self->base_time = GST_CLOCK_TIME_NONE;
+
+    /* Start streaming thread */
+    self->running = TRUE;
+    self->thread = g_thread_new("cubeeyesrc", gst_cubeeyesrc_thread_func, self);
 
     GST_INFO_OBJECT(self, "Started successfully on %s", device_path.c_str());
     return TRUE;
@@ -447,10 +458,15 @@ error:
     return FALSE;
 }
 
-static gboolean gst_cubeeyesrc_stop(GstBaseSrc *src) {
-    GstCubeEyeSrc *self = GST_CUBEEYESRC(src);
-
+static gboolean gst_cubeeyesrc_stop(GstCubeEyeSrc *self) {
     GST_DEBUG_OBJECT(self, "Stopping cubeeyesrc");
+
+    /* Stop thread */
+    if (self->thread) {
+        self->running = FALSE;
+        g_thread_join(self->thread);
+        self->thread = NULL;
+    }
 
     if (self->is_streaming) {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -491,57 +507,72 @@ static gboolean gst_cubeeyesrc_stop(GstBaseSrc *src) {
         g_free(self->priv->raw_buffer);
         self->priv->raw_buffer = NULL;
     }
-
-    return TRUE;
-}
-
-static GstCaps *gst_cubeeyesrc_get_caps(GstBaseSrc *src, GstCaps *filter) {
-    GstCaps *caps = gst_caps_new_simple("video/x-raw",
-        "format", G_TYPE_STRING, "GRAY16_LE",
-        "width", G_TYPE_INT, CUBEEYESRC_OUT_WIDTH,
-        "height", G_TYPE_INT, CUBEEYESRC_OUT_HEIGHT,
-        "framerate", GST_TYPE_FRACTION, 15, 1,
-        NULL);
-
-    if (filter) {
-        GstCaps *tmp = gst_caps_intersect_full(filter, caps, GST_CAPS_INTERSECT_FIRST);
-        gst_caps_unref(caps);
-        caps = tmp;
+    if (self->priv->depth_buffer) {
+        g_free(self->priv->depth_buffer);
+        self->priv->depth_buffer = NULL;
+    }
+    if (self->priv->amplitude_buffer) {
+        g_free(self->priv->amplitude_buffer);
+        self->priv->amplitude_buffer = NULL;
     }
 
-    return caps;
-}
-
-static gboolean gst_cubeeyesrc_set_caps(GstBaseSrc *src, GstCaps *caps) {
-    GST_DEBUG_OBJECT(src, "Set caps: %" GST_PTR_FORMAT, caps);
     return TRUE;
 }
 
-static GstFlowReturn gst_cubeeyesrc_create(GstPushSrc *src, GstBuffer **buf) {
-    GstCubeEyeSrc *self = GST_CUBEEYESRC(src);
-    GstBuffer *outbuf;
-    GstMapInfo map;
+static GstStateChangeReturn gst_cubeeyesrc_change_state(GstElement *element,
+                                                         GstStateChange transition) {
+    GstCubeEyeSrc *self = GST_CUBEEYESRC(element);
+    GstStateChangeReturn ret;
 
-    while (TRUE) {
+    switch (transition) {
+        case GST_STATE_CHANGE_NULL_TO_READY:
+            break;
+        case GST_STATE_CHANGE_READY_TO_PAUSED:
+            if (!gst_cubeeyesrc_start(self)) {
+                return GST_STATE_CHANGE_FAILURE;
+            }
+            break;
+        default:
+            break;
+    }
+
+    ret = GST_ELEMENT_CLASS(parent_class)->change_state(element, transition);
+
+    switch (transition) {
+        case GST_STATE_CHANGE_PAUSED_TO_READY:
+            gst_cubeeyesrc_stop(self);
+            break;
+        case GST_STATE_CHANGE_READY_TO_NULL:
+            break;
+        default:
+            break;
+    }
+
+    return ret;
+}
+
+static gpointer gst_cubeeyesrc_thread_func(gpointer data) {
+    GstCubeEyeSrc *self = GST_CUBEEYESRC(data);
+
+    GST_DEBUG_OBJECT(self, "Streaming thread started");
+
+    while (self->running) {
         /* Wait for frame */
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(self->fd, &fds);
 
         struct timeval tv;
-        tv.tv_sec = 2;
-        tv.tv_usec = 0;
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000;  /* 200ms timeout */
 
         int r = select(self->fd + 1, &fds, NULL, NULL, &tv);
         if (r == -1) {
             if (errno == EINTR) continue;
             GST_ERROR_OBJECT(self, "select error: %s", strerror(errno));
-            return GST_FLOW_ERROR;
+            break;
         }
-        if (r == 0) {
-            GST_ERROR_OBJECT(self, "select timeout");
-            return GST_FLOW_ERROR;
-        }
+        if (r == 0) continue;  /* Timeout, check running flag */
 
         /* Dequeue buffer */
         struct v4l2_buffer v4l2_buf = {};
@@ -551,7 +582,7 @@ static GstFlowReturn gst_cubeeyesrc_create(GstPushSrc *src, GstBuffer **buf) {
         if (xioctl(self->fd, VIDIOC_DQBUF, &v4l2_buf) < 0) {
             if (errno == EAGAIN) continue;
             GST_ERROR_OBJECT(self, "VIDIOC_DQBUF failed: %s", strerror(errno));
-            return GST_FLOW_ERROR;
+            break;
         }
 
         /* Check for valid frame */
@@ -560,7 +591,7 @@ static GstFlowReturn gst_cubeeyesrc_create(GstPushSrc *src, GstBuffer **buf) {
             continue;
         }
 
-        /* Check for warmup frames (all zeros) */
+        /* Check for warmup frames */
         uint8_t *raw_data = (uint8_t *)self->buffers[v4l2_buf.index].start;
         gboolean has_data = FALSE;
         for (guint i = 0; i < 1000 && !has_data; i++) {
@@ -572,73 +603,52 @@ static GstFlowReturn gst_cubeeyesrc_create(GstPushSrc *src, GstBuffer **buf) {
             continue;
         }
 
-        /* Copy raw frame to temp buffer */
+        /* Copy raw frame */
         memcpy(self->priv->raw_buffer, raw_data, CUBEEYESRC_RAW_SIZE);
 
-        /* Re-queue V4L2 buffer immediately */
+        /* Re-queue V4L2 buffer */
         xioctl(self->fd, VIDIOC_QBUF, &v4l2_buf);
 
-        /* Allocate output buffer */
-        outbuf = gst_buffer_new_allocate(NULL, CUBEEYESRC_OUT_SIZE, NULL);
-        if (!outbuf) {
-            GST_ERROR_OBJECT(self, "Failed to allocate buffer");
-            return GST_FLOW_ERROR;
-        }
-
-        gst_buffer_map(outbuf, &map, GST_MAP_WRITE);
-
-        /* Extract depth or amplitude */
-        gboolean success = FALSE;
+        /* Extract depth and amplitude */
+        gboolean extract_amp = (self->enable_amplitude && self->amplitude_pad);
 
 #ifdef HAVE_CUDA
         if (self->priv->cuda_available && self->priv->cuda_extractor) {
-            if (self->output_type == CUBEEYESRC_OUTPUT_AMPLITUDE) {
-                /* CUDA amplitude not implemented, fall back to CPU */
-                success = self->priv->cpu_extractor->ExtractAmplitude(
+            if (extract_amp) {
+                self->priv->cuda_extractor->ExtractDepthAndAmplitude(
                     self->priv->raw_buffer, CUBEEYESRC_RAW_SIZE,
-                    (uint16_t *)map.data, TRUE);
+                    self->priv->depth_buffer, self->priv->amplitude_buffer, TRUE);
             } else {
-                success = self->priv->cuda_extractor->ExtractDepth(
+                self->priv->cuda_extractor->ExtractDepth(
                     self->priv->raw_buffer, CUBEEYESRC_RAW_SIZE,
-                    (uint16_t *)map.data, TRUE);
+                    self->priv->depth_buffer, TRUE);
             }
         } else
 #endif
         {
-            if (self->output_type == CUBEEYESRC_OUTPUT_AMPLITUDE) {
-                success = self->priv->cpu_extractor->ExtractAmplitude(
+            if (extract_amp) {
+                self->priv->cpu_extractor->ExtractDepthAndAmplitude(
                     self->priv->raw_buffer, CUBEEYESRC_RAW_SIZE,
-                    (uint16_t *)map.data, TRUE);
+                    self->priv->depth_buffer, self->priv->amplitude_buffer, TRUE);
             } else {
-                success = self->priv->cpu_extractor->ExtractDepth(
+                self->priv->cpu_extractor->ExtractDepth(
                     self->priv->raw_buffer, CUBEEYESRC_RAW_SIZE,
-                    (uint16_t *)map.data, TRUE);
+                    self->priv->depth_buffer, TRUE);
             }
         }
 
-        if (!success) {
-            gst_buffer_unmap(outbuf, &map);
-            gst_buffer_unref(outbuf);
-            GST_ERROR_OBJECT(self, "Depth extraction failed");
-            return GST_FLOW_ERROR;
-        }
-
-        /* Apply normalization for display */
+        /* Apply normalization to depth */
         if (self->normalize) {
-            uint16_t *data = (uint16_t *)map.data;
-            gint num_pixels = CUBEEYESRC_OUT_WIDTH * CUBEEYESRC_OUT_HEIGHT;
             gint max_val = self->max_depth;
-
+            gint num_pixels = CUBEEYESRC_OUT_WIDTH * CUBEEYESRC_OUT_HEIGHT;
             for (gint i = 0; i < num_pixels; i++) {
-                guint32 val = data[i];
+                guint32 val = self->priv->depth_buffer[i];
                 if (val > (guint32)max_val) val = max_val;
-                data[i] = (uint16_t)((val * 65535) / max_val);
+                self->priv->depth_buffer[i] = (uint16_t)((val * 65535) / max_val);
             }
         }
 
-        gst_buffer_unmap(outbuf, &map);
-
-        /* Set timestamps */
+        /* Get timestamp */
         GstClock *clock = gst_element_get_clock(GST_ELEMENT(self));
         GstClockTime now = GST_CLOCK_TIME_NONE;
 
@@ -654,15 +664,35 @@ static GstFlowReturn gst_cubeeyesrc_create(GstPushSrc *src, GstBuffer **buf) {
         GstClockTime pts = (now != GST_CLOCK_TIME_NONE && self->base_time != GST_CLOCK_TIME_NONE)
                            ? (now - self->base_time) : (self->frame_count * GST_SECOND / 15);
 
-        GST_BUFFER_PTS(outbuf) = pts;
-        GST_BUFFER_DTS(outbuf) = pts;
-        GST_BUFFER_DURATION(outbuf) = GST_SECOND / 15;
-        GST_BUFFER_OFFSET(outbuf) = self->frame_count;
-        GST_BUFFER_OFFSET_END(outbuf) = self->frame_count + 1;
+        /* Push depth buffer */
+        GstBuffer *depth_buf = gst_buffer_new_allocate(NULL, CUBEEYESRC_OUT_SIZE, NULL);
+        gst_buffer_fill(depth_buf, 0, self->priv->depth_buffer, CUBEEYESRC_OUT_SIZE);
+        GST_BUFFER_PTS(depth_buf) = pts;
+        GST_BUFFER_DTS(depth_buf) = pts;
+        GST_BUFFER_DURATION(depth_buf) = GST_SECOND / 15;
+
+        GstFlowReturn ret = gst_pad_push(self->depth_pad, depth_buf);
+        if (ret != GST_FLOW_OK && ret != GST_FLOW_FLUSHING) {
+            GST_WARNING_OBJECT(self, "Depth pad push failed: %s", gst_flow_get_name(ret));
+        }
+
+        /* Push amplitude buffer if enabled */
+        if (extract_amp) {
+            GstBuffer *amp_buf = gst_buffer_new_allocate(NULL, CUBEEYESRC_OUT_SIZE, NULL);
+            gst_buffer_fill(amp_buf, 0, self->priv->amplitude_buffer, CUBEEYESRC_OUT_SIZE);
+            GST_BUFFER_PTS(amp_buf) = pts;
+            GST_BUFFER_DTS(amp_buf) = pts;
+            GST_BUFFER_DURATION(amp_buf) = GST_SECOND / 15;
+
+            ret = gst_pad_push(self->amplitude_pad, amp_buf);
+            if (ret != GST_FLOW_OK && ret != GST_FLOW_FLUSHING) {
+                GST_WARNING_OBJECT(self, "Amplitude pad push failed: %s", gst_flow_get_name(ret));
+            }
+        }
 
         self->frame_count++;
-        *buf = outbuf;
-
-        return GST_FLOW_OK;
     }
+
+    GST_DEBUG_OBJECT(self, "Streaming thread stopped");
+    return NULL;
 }

@@ -1,18 +1,19 @@
 /**
  * gstcubeeyesrc.h - CubeEye I200D ToF Camera GStreamer Source Element
  *
- * Combined source element that captures from CubeEye I200D and outputs
- * extracted depth/amplitude frames. Does V4L2 capture + depth extraction
- * in a single element.
+ * Multi-pad source element that captures from CubeEye I200D and outputs
+ * depth and amplitude on separate pads.
  *
- * Output: video/x-raw, format=GRAY16_LE, width=640, height=480
+ * Source Pads:
+ *   depth     - video/x-raw, format=GRAY16_LE, width=640, height=480 (depth in mm)
+ *   amplitude - video/x-raw, format=GRAY16_LE, width=640, height=480 (can be disabled)
  *
  * Properties:
  *   serial              - Camera serial number for device selection
  *   device              - V4L2 device path (auto-detected from serial)
- *   output-type         - "depth" or "amplitude"
- *   gradient-correction - Apply polynomial gradient correction
- *   normalize           - Scale output for display (0-max_depth -> 0-65535)
+ *   enable-amplitude    - Enable amplitude pad (default: false)
+ *   gradient-correction - Apply polynomial gradient correction to depth
+ *   normalize           - Scale depth for display (0-max_depth -> 0-65535)
  *   max-depth           - Maximum depth in mm for normalization
  *
  * Copyright (c) 2025 Atlas Robotics Inc.
@@ -22,7 +23,6 @@
 #define __GST_CUBEEYESRC_H__
 
 #include <gst/gst.h>
-#include <gst/base/gstpushsrc.h>
 
 G_BEGIN_DECLS
 
@@ -48,20 +48,17 @@ typedef struct _GstCubeEyeSrcPrivate GstCubeEyeSrcPrivate;
 #define CUBEEYESRC_OUT_HEIGHT     480
 #define CUBEEYESRC_OUT_SIZE       (CUBEEYESRC_OUT_WIDTH * CUBEEYESRC_OUT_HEIGHT * 2)
 
-/* Output type enum */
-typedef enum {
-    CUBEEYESRC_OUTPUT_DEPTH = 0,
-    CUBEEYESRC_OUTPUT_AMPLITUDE = 1,
-} GstCubeEyeSrcOutputType;
-
 struct _GstCubeEyeSrc {
-    GstPushSrc parent;
+    GstElement parent;
+
+    /* Source pads */
+    GstPad *depth_pad;
+    GstPad *amplitude_pad;
 
     /* Properties */
     gchar *serial;
     gchar *device;
-    gint device_index;
-    GstCubeEyeSrcOutputType output_type;
+    gboolean enable_amplitude;
     gboolean gradient_correction;
     gboolean normalize;
     gint max_depth;
@@ -81,12 +78,17 @@ struct _GstCubeEyeSrc {
     guint64 frame_count;
     GstClockTime base_time;
 
+    /* Streaming thread */
+    GThread *thread;
+    gboolean running;
+    GMutex lock;
+
     /* Private (depth extractor, etc.) */
     GstCubeEyeSrcPrivate *priv;
 };
 
 struct _GstCubeEyeSrcClass {
-    GstPushSrcClass parent_class;
+    GstElementClass parent_class;
 };
 
 GType gst_cubeeyesrc_get_type(void);
