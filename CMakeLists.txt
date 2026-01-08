@@ -111,7 +111,16 @@ target_link_libraries(cubeeye_device PUBLIC
     pthread
 )
 
-# List Devices CLI Tool
+# CubeEye Multi-purpose CLI Tool
+add_executable(cubeeye
+    tools/cubeeye.cpp
+)
+
+target_link_libraries(cubeeye PRIVATE
+    cubeeye_device
+)
+
+# Legacy simple list tool (deprecated, use 'cubeeye list' instead)
 add_executable(cubeeye_list_devices
     tools/cubeeye_list_devices.cpp
 )
