@@ -94,6 +94,34 @@ target_link_libraries(cubeeye_standalone_capture PRIVATE
     pthread
 )
 
+# =============================================================================
+# CubeEye Device Library (SDK-free, for GStreamer and tools)
+# =============================================================================
+
+# Device Enumeration Library
+add_library(cubeeye_device STATIC
+    src/cubeeye_device.cpp
+)
+
+target_include_directories(cubeeye_device PUBLIC
+    src
+)
+
+target_link_libraries(cubeeye_device PUBLIC
+    pthread
+)
+
+# List Devices CLI Tool
+add_executable(cubeeye_list_devices
+    tools/cubeeye_list_devices.cpp
+)
+
+target_link_libraries(cubeeye_list_devices PRIVATE
+    cubeeye_device
+)
+
+# =============================================================================
+
 # Benchmark Capture Tool (SDK + Raw via hook)
 add_executable(benchmark_capture
     src/benchmark_capture.cpp
